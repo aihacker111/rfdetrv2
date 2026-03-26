@@ -7,7 +7,9 @@ Use is subject to the DINOv3 License Agreement.
 from __future__ import annotations
 
 import logging
+import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable
 from urllib.error import URLError
@@ -45,6 +47,24 @@ def _url_for_relative(rel: str) -> str:
     """Build full HuggingFace download URL, appending ?download=true."""
     rel = rel.lstrip("/")
     return f"{HF_BASE_URL.rstrip('/')}/{rel}?download=true"
+
+
+@contextmanager
+def _exclusive_download_lock(lock_path: Path):
+    """Serialize downloads of the same file (e.g. ``torchrun`` / multi-process)."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        # No cross-process flock on Windows; single-writer .part is usually enough.
+        yield
+        return
+    import fcntl
+
+    with open(lock_path, "a+b") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def _download_file(url: str, dest: Path, chunk_size: int = 1024 * 1024) -> None:
@@ -115,11 +135,17 @@ def download_dinov3_pretrained_weights(
         if target.exists() and not overwrite:
             logger.debug("Skip existing DINOv3 weight: %s", target)
             continue
-        url = _url_for_relative(rel)
-        logger.info("Downloading DINOv3 weights → %s  url=%s", target.name, url)
-        print(f"Downloading {filename} from HuggingFace ...", file=sys.stderr)
-        _download_file(url, target)
-        print(f"Saved → {target}", file=sys.stderr)
+        lock_path = out / f".{filename}.download.lock"
+        with _exclusive_download_lock(lock_path):
+            # Another rank may have finished while we waited.
+            if target.exists() and not overwrite:
+                logger.debug("Skip existing DINOv3 weight (after lock): %s", target)
+                continue
+            url = _url_for_relative(rel)
+            logger.info("Downloading DINOv3 weights → %s  url=%s", target.name, url)
+            print(f"Downloading {filename} from HuggingFace ...", file=sys.stderr)
+            _download_file(url, target)
+            print(f"Saved → {target}", file=sys.stderr)
 
     return out
 
