@@ -248,9 +248,10 @@ Usage
     backbone = DinoV3(size="base", use_windowed_attn=True, num_windows=2)
 """
 
-import math
-from pathlib import Path
 import logging
+import math
+import os
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import torch
@@ -283,6 +284,36 @@ size_to_width   = SIZE_TO_WIDTH
 size_to_hub_name = SIZE_TO_HUB_NAME
 
 DEFAULT_DINOV3_REPO_DIR = Path(__file__).resolve().parents[3] / "dinov3"
+
+
+def dinov3_hub_repo_dir() -> Path:
+    """Root of the DINOv3 tree that contains ``hubconf.py`` (for ``torch.hub.load``).
+
+    Set env ``DINOV3_REPO_DIR`` to override the default ``<project>/dinov3``.
+    """
+    env = os.environ.get("DINOV3_REPO_DIR", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    return DEFAULT_DINOV3_REPO_DIR
+
+
+def _require_dinov3_hub_repo(repo: Path) -> None:
+    """Ensure *repo* is a usable local torch.hub checkout (not just ``.pth`` weights)."""
+    hubconf = repo / "hubconf.py"
+    if not repo.is_dir():
+        raise FileNotFoundError(
+            f"Local DINOv3 repo directory not found at '{repo}'. "
+            f"RF-DETR loads the backbone via torch.hub from this folder (it must contain "
+            f"hubconf.py and the DINOv3 package). Copy the `dinov3/` directory from the "
+            f"RF-DETR repo, or set DINOV3_REPO_DIR to a full DINOv3 checkout."
+        )
+    if not hubconf.is_file():
+        raise FileNotFoundError(
+            f"Incomplete DINOv3 repo at '{repo}': missing {hubconf}. "
+            f"Downloading ``.pth`` weights is not enough — torch.hub needs the full source "
+            f"tree including hubconf.py. Add the complete `dinov3/` folder from this project "
+            f"or set DINOV3_REPO_DIR to a valid checkout."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -503,7 +534,8 @@ class DinoV3(nn.Module):
         One of:
         - ``None``: auto-discover ``<hub_name>*.pth`` in the project root.
         - ``"/path/to/weights.pth"``: load weights from a specific file using
-          the default DINOv3 repo at ``DEFAULT_DINOV3_REPO_DIR``.
+          the DINOv3 repo at ``dinov3_hub_repo_dir()`` (default: ``<project>/dinov3``;
+          override with env ``DINOV3_REPO_DIR``).
         - ``"path/to/dinov3::path/to/weights.pth"``: specify both the repo
           directory and the weights file explicitly.
     """
@@ -639,7 +671,9 @@ class DinoV3(nn.Module):
                     "or pass pretrained_encoder='/path/to/weights.pth' "
                     "(or 'path/to/dinov3::path/to/weights.pth')."
                 )
-            return str(DEFAULT_DINOV3_REPO_DIR), str(candidates[0])
+            repo = dinov3_hub_repo_dir()
+            _require_dinov3_hub_repo(repo)
+            return str(repo), str(candidates[0])
 
         repo_or_dir, weights = parse_torch_hub_source_spec(pretrained_encoder)
 
@@ -649,6 +683,7 @@ class DinoV3(nn.Module):
                 raise FileNotFoundError(
                     f"DINOv3 repo not found at '{repo_or_dir}'"
                 )
+            _require_dinov3_hub_repo(Path(repo_or_dir))
             if not weights:
                 raise ValueError(
                     "The 'repo::weights' format requires a weights path after '::'."
@@ -666,14 +701,10 @@ class DinoV3(nn.Module):
                 f"pretrained_encoder must be a path to an existing .pth file, "
                 f"got: '{pretrained_encoder}'"
             )
-        if not DEFAULT_DINOV3_REPO_DIR.exists():
-            raise FileNotFoundError(
-                f"Local DINOv3 repo not found at '{DEFAULT_DINOV3_REPO_DIR}'. "
-                "Ensure the 'dinov3' folder exists in your project root, or "
-                "use 'path/to/dinov3::path/to/weights.pth' to specify both."
-            )
+        repo = dinov3_hub_repo_dir()
+        _require_dinov3_hub_repo(repo)
         logger.info("Loading DINOv3 weights from local file: %s", weights_path)
-        return str(DEFAULT_DINOV3_REPO_DIR), str(weights_path)
+        return str(repo), str(weights_path)
 
     # ------------------------------------------------------------------
     # Windowing helpers
