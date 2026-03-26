@@ -12,12 +12,20 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable
+import shutil
+import tempfile
+import zipfile
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
 HF_BASE_URL = "https://huggingface.co/myn0908/dinov3/resolve/main"
+
+# Official DINOv3 tree (hubconf.py + package) — used when ``<project>/dinov3`` is missing.
+DEFAULT_DINOV3_SOURCE_ZIP_URL = (
+    "https://github.com/facebookresearch/dinov3/archive/refs/heads/main.zip"
+)
 
 # (filename, path_under_HF_repo)
 DINOV3_PRETRAINED_MANIFEST: tuple[tuple[str, str], ...] = (
@@ -67,13 +75,15 @@ def _exclusive_download_lock(lock_path: Path):
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
-def _download_file(url: str, dest: Path, chunk_size: int = 1024 * 1024) -> None:
+def _download_file(
+    url: str, dest: Path, chunk_size: int = 1024 * 1024, *, timeout: int = 120
+) -> None:
     """Stream-download *url* into *dest*, writing atomically via a .part temp file."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
     req = Request(url, headers={"User-Agent": "RF-DETR/dinov3_pretrained"})
     try:
-        with urlopen(req, timeout=120) as resp, open(tmp, "wb") as out:
+        with urlopen(req, timeout=timeout) as resp, open(tmp, "wb") as out:
             total = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
             while True:
@@ -159,6 +169,78 @@ def ensure_dinov3_pretrained_weights(
     return download_dinov3_pretrained_weights(
         project_root=project_root, overwrite=overwrite
     )
+
+
+def ensure_dinov3_hub_source(dest_repo_dir: Path) -> Path:
+    """Ensure *dest_repo_dir* contains the DINOv3 torch.hub tree (``hubconf.py`` + ``dinov3/`` package).
+
+    If ``hubconf.py`` is missing, downloads the official GitHub archive (zip), extracts it
+    into *dest_repo_dir*, then removes the temp zip. Uses a file lock so ``torchrun`` ranks
+    do not race.
+
+    Override zip URL with env ``DINOV3_SOURCE_ZIP_URL``. Set ``DINOV3_SKIP_SOURCE_DOWNLOAD=1``
+    to disable auto-fetch (raises if the tree is still missing).
+    """
+    hubconf = dest_repo_dir / "hubconf.py"
+    if hubconf.is_file():
+        return dest_repo_dir
+
+    skip = os.environ.get("DINOV3_SKIP_SOURCE_DOWNLOAD", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if skip:
+        raise FileNotFoundError(
+            f"DINOv3 hub source missing at '{dest_repo_dir}' (no hubconf.py). "
+            f"Unset DINOV3_SKIP_SOURCE_DOWNLOAD or copy the `dinov3/` folder from this project."
+        )
+
+    lock_path = dest_repo_dir.parent / ".dinov3_hub_source.download.lock"
+    with _exclusive_download_lock(lock_path):
+        if (dest_repo_dir / "hubconf.py").is_file():
+            return dest_repo_dir
+
+        url = os.environ.get("DINOV3_SOURCE_ZIP_URL", "").strip() or DEFAULT_DINOV3_SOURCE_ZIP_URL
+        logger.info("Downloading DINOv3 hub source tree → %s  url=%s", dest_repo_dir, url)
+        print(
+            "Downloading DINOv3 source (hubconf + package) from GitHub ...",
+            file=sys.stderr,
+        )
+
+        parent = dest_repo_dir.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        zip_path = parent / ".dinov3_main_source.zip"
+        _download_file(url, zip_path, timeout=600)
+
+        try:
+            with tempfile.TemporaryDirectory(dir=str(parent)) as tmp:
+                tmp_root = Path(tmp)
+                with zipfile.ZipFile(zip_path, "r") as zf:
+                    zf.extractall(tmp_root)
+                # GitHub archive has a single top-level dir, e.g. ``dinov3-main/``.
+                subdirs = [p for p in tmp_root.iterdir() if p.is_dir()]
+                if len(subdirs) != 1:
+                    raise RuntimeError(
+                        f"Unexpected zip layout under {tmp_root}: {subdirs!r}"
+                    )
+                extracted = subdirs[0]
+                if dest_repo_dir.exists():
+                    shutil.rmtree(dest_repo_dir)
+                shutil.move(str(extracted), str(dest_repo_dir))
+        finally:
+            try:
+                zip_path.unlink()
+            except OSError:
+                pass
+
+        if not (dest_repo_dir / "hubconf.py").is_file():
+            raise FileNotFoundError(
+                f"After extract, hubconf.py still missing at '{dest_repo_dir}'."
+            )
+        print(f"DINOv3 hub source saved → {dest_repo_dir}", file=sys.stderr)
+
+    return dest_repo_dir
 
 
 def resolve_pretrained_encoder_path(

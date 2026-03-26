@@ -297,23 +297,18 @@ def dinov3_hub_repo_dir() -> Path:
     return DEFAULT_DINOV3_REPO_DIR
 
 
-def _require_dinov3_hub_repo(repo: Path) -> None:
-    """Ensure *repo* is a usable local torch.hub checkout (not just ``.pth`` weights)."""
-    hubconf = repo / "hubconf.py"
-    if not repo.is_dir():
-        raise FileNotFoundError(
-            f"Local DINOv3 repo directory not found at '{repo}'. "
-            f"RF-DETR loads the backbone via torch.hub from this folder (it must contain "
-            f"hubconf.py and the DINOv3 package). Copy the `dinov3/` directory from the "
-            f"RF-DETR repo, or set DINOV3_REPO_DIR to a full DINOv3 checkout."
-        )
-    if not hubconf.is_file():
-        raise FileNotFoundError(
-            f"Incomplete DINOv3 repo at '{repo}': missing {hubconf}. "
-            f"Downloading ``.pth`` weights is not enough — torch.hub needs the full source "
-            f"tree including hubconf.py. Add the complete `dinov3/` folder from this project "
-            f"or set DINOV3_REPO_DIR to a valid checkout."
-        )
+def _local_hub_ready(repo: Path) -> bool:
+    return repo.is_dir() and (repo / "hubconf.py").is_file()
+
+
+def _torch_hub_load_dinov3(hub_name: str, repo_or_dir: str, weights: str) -> nn.Module:
+    """Load DINOv3 from a local directory; fetch the official tree into that folder if needed."""
+    from rfdetrv2.util.dinov3_pretrained import ensure_dinov3_hub_source
+
+    repo = Path(repo_or_dir)
+    if not _local_hub_ready(repo):
+        ensure_dinov3_hub_source(repo)
+    return torch.hub.load(str(repo), hub_name, source="local", weights=weights)
 
 
 # ---------------------------------------------------------------------------
@@ -533,9 +528,10 @@ class DinoV3(nn.Module):
     pretrained_encoder:
         One of:
         - ``None``: auto-discover ``<hub_name>*.pth`` in the project root.
-        - ``"/path/to/weights.pth"``: load weights from a specific file using
-          the DINOv3 repo at ``dinov3_hub_repo_dir()`` (default: ``<project>/dinov3``;
-          override with env ``DINOV3_REPO_DIR``).
+        - ``"/path/to/weights.pth"``: load weights from that ``.pth`` using the DINOv3
+          source tree at ``dinov3_hub_repo_dir()`` (default ``<project>/dinov3``; if
+          ``hubconf.py`` is missing it is fetched as a zip into that folder; override
+          with env ``DINOV3_REPO_DIR``).
         - ``"path/to/dinov3::path/to/weights.pth"``: specify both the repo
           directory and the weights file explicitly.
     """
@@ -610,12 +606,10 @@ class DinoV3(nn.Module):
         # Resolve repo / weights paths
         # ------------------------------------------------------------------
         hub_name = SIZE_TO_HUB_NAME[size]
-        repo_or_dir, weights = self._resolve_weights(
-            hub_name, pretrained_encoder
-        )
+        repo_or_dir, weights = self._resolve_weights(hub_name, pretrained_encoder)
 
         # ------------------------------------------------------------------
-        # Load from torch.hub
+        # Load from torch.hub (local folder; may auto-download source zip first)
         # ------------------------------------------------------------------
         logger.info(
             "Loading DINOv3 '%s' from repo=%s  weights=%s",
@@ -623,9 +617,7 @@ class DinoV3(nn.Module):
             repo_or_dir,
             weights,
         )
-        hub_model = torch.hub.load(
-            repo_or_dir, hub_name, source="local", weights=weights
-        )
+        hub_model = _torch_hub_load_dinov3(hub_name, repo_or_dir, weights)
 
         # ------------------------------------------------------------------
         # Optional: gradient checkpointing
@@ -660,7 +652,7 @@ class DinoV3(nn.Module):
     def _resolve_weights(
         hub_name: str, pretrained_encoder: Optional[str]
     ) -> Tuple[str, str]:
-        """Return ``(repo_or_dir, weights_path)`` for ``torch.hub.load``."""
+        """Return ``(repo_or_dir, weights_path)`` for ``torch.hub.load(..., source='local')``."""
         if pretrained_encoder is None:
             project_root = Path(__file__).resolve().parents[3]
             candidates = sorted(project_root.glob(f"{hub_name}*.pth"))
@@ -672,18 +664,17 @@ class DinoV3(nn.Module):
                     "(or 'path/to/dinov3::path/to/weights.pth')."
                 )
             repo = dinov3_hub_repo_dir()
-            _require_dinov3_hub_repo(repo)
             return str(repo), str(candidates[0])
 
         repo_or_dir, weights = parse_torch_hub_source_spec(pretrained_encoder)
 
         if "::" in pretrained_encoder:
-            # Explicit "repo::weights" form
-            if not Path(repo_or_dir).exists():
+            # Explicit "repo::weights" form (repo may be created by auto-download)
+            repo_p = Path(repo_or_dir)
+            if repo_p.exists() and not repo_p.is_dir():
                 raise FileNotFoundError(
-                    f"DINOv3 repo not found at '{repo_or_dir}'"
+                    f"DINOv3 repo path is not a directory: '{repo_or_dir}'"
                 )
-            _require_dinov3_hub_repo(Path(repo_or_dir))
             if not weights:
                 raise ValueError(
                     "The 'repo::weights' format requires a weights path after '::'."
@@ -702,7 +693,6 @@ class DinoV3(nn.Module):
                 f"got: '{pretrained_encoder}'"
             )
         repo = dinov3_hub_repo_dir()
-        _require_dinov3_hub_repo(repo)
         logger.info("Loading DINOv3 weights from local file: %s", weights_path)
         return str(repo), str(weights_path)
 
