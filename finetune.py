@@ -19,8 +19,8 @@ from rfdetrv2.util.dinov3_pretrained import resolve_pretrained_encoder_path
 from rfdetrv2.util.rfdetr_pretrained import resolve_rfdetr_coco_checkpoint
 
 # ─── PATHS (không sửa) ────────────────────────────────────────────────────────
-DATASET_DIR   = os.environ.get("DATASET_DIR",   "data/custom")     # custom small dataset
-OUTPUT_DIR    = os.environ.get("OUTPUT_DIR",    "output/finetune")
+DATASET_DIR   = os.environ.get("DATASET_DIR",   "/kaggle/input/datasets/duwipurnamasidik/visdrone-2019-coco-format")     # custom small dataset
+OUTPUT_DIR    = os.environ.get("OUTPUT_DIR",    "/kaggle/working/output/finetune")
 # COCO RF-DETR checkpoint: optional path. If unset → auto-download from HuggingFace
 # (https://huggingface.co/myn0908/rfdetrv2) into rfdetr_pretrained/ for this MODEL_SIZE.
 COCO_WEIGHTS  = os.environ.get("COCO_WEIGHTS")  # e.g. /path/to/custom.pth or weights/mine.pth
@@ -34,7 +34,7 @@ DINO_WEIGHTS_BY_SIZE = {
 
 # ─── HYPERPARAMETERS (agent edits below) ──────────────────────────────────────
 
-MODEL_SIZE = "base"   # "nano" | "small" | "base" | "large"
+MODEL_SIZE = "nano"   # "nano" | "small" | "base" | "large"
 
 # Training
 EPOCHS               = 10

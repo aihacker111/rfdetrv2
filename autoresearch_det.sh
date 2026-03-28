@@ -16,7 +16,7 @@ fi
 echo "[OK] COCO weights: $COCO_WEIGHTS"
 
 # 2. Check dataset
-DATASET_DIR="${DATASET_DIR:-data/custom}"
+DATASET_DIR="${DATASET_DIR:-/kaggle/input/datasets/duwipurnamasidik/visdrone-2019-coco-format}"
 if [ ! -d "$DATASET_DIR" ]; then
     echo "ERROR: Dataset not found at $DATASET_DIR"
     echo "  Set env var: export DATASET_DIR=/path/to/your/coco_format_data"

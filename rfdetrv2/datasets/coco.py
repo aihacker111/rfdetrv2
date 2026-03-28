@@ -237,10 +237,15 @@ def build_coco(image_set: str, args: Any, resolution: int) -> CocoDetection:
     root = Path(args.coco_path)
     assert root.exists(), f'provided COCO path {root} does not exist'
     mode = 'instances'
+    # PATHS = {
+    #     "train": (root / "train2017", root / "annotations" / f'{mode}_train2017.json'),
+    #     "val": (root /  "val2017", root / "annotations" / f'{mode}_val2017.json'),
+    #     "test": (root / "val2017", root / "annotations" / f'{mode}_val2017.json'),
+    # }
     PATHS = {
-        "train": (root / "train2017", root / "annotations" / f'{mode}_train2017.json'),
-        "val": (root /  "val2017", root / "annotations" / f'{mode}_val2017.json'),
-        "test": (root / "val2017", root / "annotations" / f'{mode}_val2017.json'),
+        "train": (root / "train", root / 'annotations_VisDrone_train.json'),
+        "val": (root /  "val", root / 'annotations_VisDrone_val.json'),
+        "test": (root / "val", root / 'annotations_VisDrone_val.json'),
     }
 
     img_folder, ann_file = PATHS[image_set.split("_")[0]]
