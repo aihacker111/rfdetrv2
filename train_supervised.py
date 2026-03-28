@@ -46,20 +46,6 @@ def parse_args():
     parser.add_argument("--amp", action="store_true", default=False, help="Mixed precision training")
     parser.add_argument("--no-amp", action="store_false", dest="amp")
     parser.add_argument("--use-windowed-attn", action="store_true", help="Enable DINOv3 windowed attention (reduces VRAM)")
-    parser.add_argument(
-        "--use-rsa",
-        action="store_true",
-        dest="use_rsa",
-        help="Bật Semantic Routing Attention (mặc định: tắt; không tương thích --use-windowed-attn).",
-    )
-    parser.add_argument(
-        "--sra-per-scale",
-        action="store_true",
-        dest="sra_per_scale",
-        help="Một SRA riêng cho mỗi mức feature (nhiều param). Mặc định: một SRA dùng chung (nhẹ hơn).",
-    )
-    parser.add_argument("--sra-G", type=int, default=32, dest="sra_G", help="SRA routing groups G (nhỏ hơn → ít param)")
-    parser.add_argument("--sra-heads", type=int, default=8, dest="sra_heads", help="SRA attention heads")
     parser.add_argument("--lr", type=float, default=2e-4,
                         help="Decoder LR (base, trước scaling). 2e-4 → ~5.66e-4 effective (8 GPU sqrt)")
     parser.add_argument("--lr-encoder", type=float, default=2.5e-5,
@@ -124,10 +110,7 @@ def main() -> None:
     model_kwargs = dict(
         pretrained_encoder=pretrained,
         use_windowed_attn=getattr(args, "use_windowed_attn", False),
-        use_rsa=getattr(args, "use_rsa", False),
-        sra_shared=not getattr(args, "sra_per_scale", False),
-        sra_G=getattr(args, "sra_G", 32),
-        sra_heads=getattr(args, "sra_heads", 8),
+        use_rsa=False,  # supervised script: no Semantic Routing Attention (SRA)
         use_convnext_projector=not getattr(args, "no_use_convnext_projector", False),
         freeze_encoder=getattr(args, "freeze_encoder", False),
     )

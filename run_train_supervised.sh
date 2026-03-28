@@ -8,7 +8,7 @@ export CUDA_VISIBLE_DEVICES=0,1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATASET_DIR="${DATASET_DIR:-/workspace/coco_2017}"
-OUTPUT_DIR="${OUTPUT_DIR:-/workspace/output/rfdetrv2_nano_supervised}"
+OUTPUT_DIR="${OUTPUT_DIR:-/workspace/output/rfdetrv2_small_supervised}"
 TRAIN_PY="${SCRIPT_DIR}/train_supervised.py"
 
 NUM_GPUS="${NUM_GPUS:-2}"
@@ -35,14 +35,9 @@ torchrun --standalone --nproc_per_node=$NUM_GPUS --master_port="${MASTER_PORT:-2
     --batch-size "$BATCH_SIZE_PER_GPU" \
     --num-workers 4 \
     --epochs 50 \
-    --model-size nano \
+    --model-size small \
     --use-varifocal-loss \
-    --tensorboard \
-    --use-rsa \
-    --sra-G 32 \
-    --sra-heads 8 \
-    --freeze-encoder
+    --tensorboard
     # use_convnext_projector: bật mặc định
-    # --sra-per-scale \   # mỗi mức feature một SRA (nhiều param hơn)
-    # --use-windowed-attn \   # xung khắc với RSA
+    # --use-windowed-attn \   # giảm VRAM (DINOv3)
 echo "Training completed!"
