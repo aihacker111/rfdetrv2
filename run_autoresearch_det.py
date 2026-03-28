@@ -31,7 +31,7 @@ FINETUNE_FILE      = "finetune.py"
 RESULTS_FILE       = "results.tsv"
 LOG_FILE           = "run.log"
 TIMEOUT_FACTOR     = 2.5
-NUM_GPUS           = 1   # overridden by --gpus
+NUM_GPUS           = 2   # overridden by --gpus
 
 
 # ── GPU utils ─────────────────────────────────────────────────────────────────
