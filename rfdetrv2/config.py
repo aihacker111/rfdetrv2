@@ -163,7 +163,7 @@ class RFDETRLargeConfig(ModelConfig):
     dec_layers: int = 3
     sa_nheads: int = 8
     ca_nheads: int = 16
-    dec_n_points: int = 12
+    dec_n_points: int = 8
     num_queries: int = 300
     num_select: int = 300
     # num_classes: int = 80
