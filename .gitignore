@@ -1,0 +1,27 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Training / checkpoints (large)
+dinov3_pretrained/
+rfdetr_pretrained/
+*.pth.part
+runs/
+wandb/
+
+# Jupyter
+.ipynb_checkpoints/
