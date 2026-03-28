@@ -8,7 +8,7 @@ export CUDA_VISIBLE_DEVICES=0,1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATASET_DIR="${DATASET_DIR:-/workspace/coco_2017}"
-OUTPUT_DIR="${OUTPUT_DIR:-/workspace/output/rfdetrv2_large_supervised}"
+OUTPUT_DIR="${OUTPUT_DIR:-/workspace/output/rfdetrv2_small_supervised}"
 TRAIN_PY="${SCRIPT_DIR}/train_supervised.py"
 
 NUM_GPUS="${NUM_GPUS:-2}"
@@ -28,14 +28,14 @@ echo "Dataset: $DATASET_DIR"
 echo "Output:  $OUTPUT_DIR"
 # LR: lr=2e-4, lr_encoder=2.5e-5 (effective ~5.66e-4 / ~7.07e-5 sau sqrt 8 GPU)
 
-torchrun --standalone --nproc_per_node=$NUM_GPUS --master_port="${MASTER_PORT:-29500}" \
+torchrun --standalones --nproc_per_node=$NUM_GPUS --master_port="${MASTER_PORT:-29500}" \
     "$TRAIN_PY" \
     --dataset-dir "$DATASET_DIR" \
     --output-dir "$OUTPUT_DIR" \
     --batch-size "$BATCH_SIZE_PER_GPU" \
     --num-workers 8 \
     --epochs 50 \
-    --model-size large \
+    --model-size small \
     --use-varifocal-loss \
     --tensorboard
     # use_convnext_projector: bật mặc định
