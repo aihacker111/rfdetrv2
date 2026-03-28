@@ -8,7 +8,7 @@ export CUDA_VISIBLE_DEVICES=0,1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATASET_DIR="${DATASET_DIR:-/workspace/coco_2017}"
-OUTPUT_DIR="${OUTPUT_DIR:-/workspace/coco_2017/output/rfdetrv2_nano_supervised}"
+OUTPUT_DIR="${OUTPUT_DIR:-/workspace/output/rfdetrv2_nano_supervised}"
 TRAIN_PY="${SCRIPT_DIR}/train_supervised.py"
 
 NUM_GPUS="${NUM_GPUS:-2}"
