@@ -209,7 +209,8 @@ class TrainConfig(BaseModel):
     prototype_use_repulsion: bool = True   # [ENH-3] Toggle inter-class repulsion
     dataset_file: Literal["coco", "o365", "roboflow"] = "roboflow"
     square_resize_div_64: bool = True
-    dataset_dir: str
+    dataset_dir: str  # COCO layout root (train/, val/, annotations/); also default for coco_path when unset
+    coco_path: Optional[str] = None  # If None, train_from_config uses dataset_dir for build_coco
     output_dir: str = "output"
     multi_scale: bool = True
     expanded_scales: bool = True
@@ -231,9 +232,9 @@ class TrainConfig(BaseModel):
     eval_max_dets: int = 500
     freeze_encoder: bool = False  # Freeze DINOv3 backbone (no gradient update)
 
-    @field_validator("dataset_dir", "output_dir", mode="after")
+    @field_validator("dataset_dir", "output_dir", "coco_path", mode="after")
     @classmethod
-    def expand_paths(cls, v: str) -> str:
+    def expand_paths(cls, v: str | None) -> str | None:
         """
         Expand user paths (e.g., '~' or paths with separators) but leave simple filenames
         (like 'rf-detr-base.pth') unchanged so they can match hosted model keys.

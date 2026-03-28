@@ -148,6 +148,11 @@ class RFDETRV2:
         )
 
     def train_from_config(self, config: TrainConfig, **kwargs):
+        # ``coco_path`` is required by ``build_coco`` but not always passed (TrainConfig may omit it).
+        kwargs = dict(kwargs)
+        if kwargs.get("coco_path") is None:
+            kwargs["coco_path"] = getattr(config, "coco_path", None) or config.dataset_dir
+
         if config.dataset_file == "roboflow":
             class_names = self._load_classes(config.dataset_dir)
             num_classes = len(class_names)
@@ -198,6 +203,9 @@ class RFDETRV2:
                 kwargs.pop(k)
 
         all_kwargs = {**model_config, **train_config, **kwargs, "num_classes": num_classes}
+        # ``train_config`` may contain ``coco_path=None``; that would win over kwargs after the pop loop.
+        if all_kwargs.get("coco_path") is None:
+            all_kwargs["coco_path"] = getattr(config, "coco_path", None) or config.dataset_dir
 
         metrics_plot_sink = MetricsPlotSink(output_dir=config.output_dir)
         self.callbacks["on_fit_epoch_end"].append(metrics_plot_sink.update)
