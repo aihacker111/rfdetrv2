@@ -24,6 +24,7 @@ except:
     pass
 
 from rfdetrv2.config import ModelConfig, RFDETRBaseConfig, RFDETRLargeConfig, RFDETRNanoConfig, RFDETRSmallConfig, TrainConfig
+from rfdetrv2.datasets.coco import infer_coco_num_classes_and_names
 from rfdetrv2.main import Model
 from rfdetrv2.util.coco_classes import COCO_CLASSES
 from rfdetrv2.util.metrics import MetricsPlotSink, MetricsTensorBoardSink, MetricsWandBSink
@@ -179,8 +180,20 @@ class RFDETRV2:
                     logger.warning("Failed to inspect COCO category ids for num_classes inference: %s", exc)
             self.model.class_names = class_names
         elif config.dataset_file == "coco":
-            class_names = COCO_CLASSES
-            num_classes = 90
+            # Custom COCO-format fine-tuning: infer K from train JSON (not MS-COCO 90).
+            root = getattr(config, "coco_path", None) or config.dataset_dir
+            inferred = infer_coco_num_classes_and_names(root)
+            if inferred is not None:
+                class_names, num_classes = inferred
+                self.model.class_names = class_names
+                logger.info(
+                    "dataset_file=coco: inferred num_classes=%d from annotations under %s",
+                    num_classes,
+                    root,
+                )
+            else:
+                class_names = COCO_CLASSES
+                num_classes = 90
         else:
             raise ValueError(f"Invalid dataset file: {config.dataset_file}")
 

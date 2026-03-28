@@ -18,6 +18,7 @@ COCO dataset which returns image_id for evaluation.
 
 Mostly copy-paste from https://github.com/pytorch/vision/blob/13b35ff/references/detection/coco_utils.py
 """
+import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -232,6 +233,53 @@ def make_coco_transforms_square_div_64(image_set: str, resolution: int, multi_sc
         ])
 
     raise ValueError(f'unknown {image_set}')
+
+
+def resolve_coco_train_annotation_path(root: Union[str, Path]) -> Optional[Path]:
+    """Return the COCO JSON path used for the train split, if it exists.
+
+    Order matches common layouts (Roboflow, VisDrone-style, MS COCO).
+    """
+    root = Path(root)
+    candidates = [
+        root / "train" / "_annotations.coco.json",
+        root / "annotations_VisDrone_train.json",
+        root / "annotations" / "instances_train2017.json",
+    ]
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
+
+
+def infer_coco_num_classes_and_names(root: Union[str, Path]) -> Optional[Tuple[List[str], int]]:
+    """Read categories from the train COCO JSON and return (class_names, num_classes).
+
+    ``num_classes`` matches how labels appear in annotations (sparse COCO ids or 0-based).
+    Returns ``None`` if no known annotation file exists.
+    """
+    ann_path = resolve_coco_train_annotation_path(root)
+    if ann_path is None:
+        return None
+    try:
+        with open(ann_path, "r", encoding="utf-8") as f:
+            anns = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    categories = anns.get("categories") or []
+    if not categories:
+        return None
+    categories = sorted(categories, key=lambda c: int(c["id"]))
+    class_names = [str(c.get("name", "")) for c in categories]
+    category_ids = [int(c["id"]) for c in categories if "id" in c]
+    if not category_ids:
+        return None
+    lo, hi = min(category_ids), max(category_ids)
+    # Labels in the dataset are raw category_id. Output dim must cover max(label).
+    # 0-based ids → num_classes = hi + 1; 1-based / MS COCO sparse (1..90) → num_classes = hi.
+    num_classes = hi + 1 if lo == 0 else hi
+    return class_names, num_classes
+
 
 def build_coco(image_set: str, args: Any, resolution: int) -> CocoDetection:
     root = Path(args.coco_path)
