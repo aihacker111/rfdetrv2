@@ -33,7 +33,7 @@ torchrun --nproc_per_node=$NUM_GPUS --master_port="${MASTER_PORT:-29500}" \
     --dataset-dir "$DATASET_DIR" \
     --output-dir "$OUTPUT_DIR" \
     --batch-size "$BATCH_SIZE_PER_GPU" \
-    --num-workers 8 \
+    --num-workers 4 \
     --epochs 50 \
     --model-size small \
     --use-varifocal-loss \
