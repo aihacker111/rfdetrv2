@@ -113,6 +113,7 @@ def main():
     model = model_cls(**model_kw)
 
     model.train(
+        coco_path=DATASET_DIR,
         dataset_dir=DATASET_DIR,
         dataset_file="coco",           # dataset phải ở COCO format
         epochs=EPOCHS,
