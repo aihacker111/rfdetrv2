@@ -28,7 +28,7 @@ echo "Dataset: $DATASET_DIR"
 echo "Output:  $OUTPUT_DIR"
 # LR: lr=2e-4, lr_encoder=2.5e-5 (effective ~5.66e-4 / ~7.07e-5 sau sqrt 8 GPU)
 
-torchrun --standalones --nproc_per_node=$NUM_GPUS --master_port="${MASTER_PORT:-29500}" \
+torchrun --nproc_per_node=$NUM_GPUS --master_port="${MASTER_PORT:-29500}" \
     "$TRAIN_PY" \
     --dataset-dir "$DATASET_DIR" \
     --output-dir "$OUTPUT_DIR" \
