@@ -12,7 +12,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-/lustre/scratch/client/scratch/dms/dms_group/tinvna/ou
 TRAIN_PY="${SCRIPT_DIR}/train_supervised.py"
 
 NUM_GPUS="${NUM_GPUS:-2}"
-BATCH_SIZE_PER_GPU="${BATCH_SIZE_PER_GPU:-8}"
+BATCH_SIZE_PER_GPU="${BATCH_SIZE_PER_GPU:-16}"
 
 echo "Checking GPU availability..."
 nvidia-smi || echo "Warning: nvidia-smi not found."
