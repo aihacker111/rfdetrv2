@@ -74,10 +74,13 @@ class CocoDetection(torchvision.datasets.CocoDetection):
         super(CocoDetection, self).__init__(img_folder, ann_file)
         self._transforms = transforms
         self.include_masks = include_masks
-        self.prepare = ConvertCoco(include_masks=include_masks)
         # Raw COCO category_id → contiguous 0..K-1 (SetCriterion / scatter expect this range).
         cat_ids = sorted(int(x) for x in self.coco.getCatIds())
         self._cat_id_to_label = {cid: i for i, cid in enumerate(cat_ids)}
+        self.prepare = ConvertCoco(
+            include_masks=include_masks,
+            valid_category_ids=set(cat_ids),
+        )
 
     def __getitem__(self, idx: int) -> Tuple[Any, Any]:
         img, target = super(CocoDetection, self).__getitem__(idx)
@@ -99,8 +102,13 @@ class CocoDetection(torchvision.datasets.CocoDetection):
 
 class ConvertCoco(object):
 
-    def __init__(self, include_masks: bool = False) -> None:
+    def __init__(
+        self,
+        include_masks: bool = False,
+        valid_category_ids: Optional[set] = None,
+    ) -> None:
         self.include_masks = include_masks
+        self.valid_category_ids = valid_category_ids
 
     def __call__(self, image: Image.Image, target: Dict[str, Any]) -> Tuple[Image.Image, Dict[str, Any]]:
         w, h = image.size
@@ -111,6 +119,25 @@ class ConvertCoco(object):
         anno = target["annotations"]
 
         anno = [obj for obj in anno if 'iscrowd' not in obj or obj['iscrowd'] == 0]
+        if self.valid_category_ids is not None:
+            anno = [
+                obj for obj in anno
+                if int(obj["category_id"]) in self.valid_category_ids
+            ]
+
+        if len(anno) == 0:
+            target = {
+                "boxes": torch.zeros((0, 4), dtype=torch.float32),
+                "labels": torch.zeros((0,), dtype=torch.int64),
+                "image_id": image_id,
+                "area": torch.zeros((0,), dtype=torch.float32),
+                "iscrowd": torch.zeros((0,), dtype=torch.int64),
+                "orig_size": torch.as_tensor([int(h), int(w)]),
+                "size": torch.as_tensor([int(h), int(w)]),
+            }
+            if self.include_masks:
+                target["masks"] = torch.zeros((0, h, w), dtype=torch.uint8).bool()
+            return image, target
 
         boxes = [obj["bbox"] for obj in anno]
         # guard against no boxes via resizing
