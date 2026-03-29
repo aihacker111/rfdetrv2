@@ -9,7 +9,7 @@ import os
 from collections import defaultdict
 from copy import deepcopy
 from logging import getLogger
-from typing import List, Union
+from typing import List, Optional, Union
 
 import numpy as np
 import supervision as sv
@@ -154,51 +154,46 @@ class RFDETRV2:
         if kwargs.get("coco_path") is None:
             kwargs["coco_path"] = getattr(config, "coco_path", None) or config.dataset_dir
 
+        label_to_cat_id: Optional[List[int]] = None
         if config.dataset_file == "roboflow":
-            class_names = self._load_classes(config.dataset_dir)
-            num_classes = len(class_names)
-            # COCO-style Roboflow datasets may keep sparse/non-contiguous category ids
-            # (e.g. official COCO ids go up to 90 while only 80 classes exist).
-            # This codebase expects args.num_classes ~= max class id, not class count.
             coco_ann = os.path.join(config.dataset_dir, "train", "_annotations.coco.json")
             if os.path.exists(coco_ann):
-                try:
-                    with open(coco_ann, "r") as f:
-                        anns = json.load(f)
-                    category_ids = [int(c["id"]) for c in anns.get("categories", []) if "id" in c]
-                    if category_ids:
-                        max_category_id = max(category_ids)
-                        if max_category_id != num_classes:
-                            logger.warning(
-                                "Detected sparse COCO category ids in Roboflow dataset "
-                                "(class_count=%d, max_category_id=%d). Using max_category_id for num_classes.",
-                                num_classes,
-                                max_category_id,
-                            )
-                        num_classes = max_category_id
-                except Exception as exc:
-                    logger.warning("Failed to inspect COCO category ids for num_classes inference: %s", exc)
+                with open(coco_ann, "r") as f:
+                    anns = json.load(f)
+                cats = sorted(anns.get("categories", []), key=lambda c: int(c["id"]))
+                cats = [c for c in cats if c.get("supercategory") != "none"]
+                class_names = [c["name"] for c in cats]
+                label_to_cat_id = [int(c["id"]) for c in cats]
+                num_classes = len(class_names)
+            else:
+                class_names = self._load_classes(config.dataset_dir)
+                num_classes = len(class_names)
             self.model.class_names = class_names
         elif config.dataset_file == "coco":
-            # Custom COCO-format fine-tuning: infer K from train JSON (not MS-COCO 90).
+            # K foreground classes; CocoDetection remaps raw category_id → 0..K-1.
             root = getattr(config, "coco_path", None) or config.dataset_dir
             inferred = infer_coco_num_classes_and_names(root)
             if inferred is not None:
-                class_names, num_classes = inferred
+                class_names, num_classes, label_to_cat_id = inferred
                 self.model.class_names = class_names
                 logger.info(
-                    "dataset_file=coco: inferred num_classes=%d from annotations under %s",
+                    "dataset_file=coco: num_classes=%d (K foreground) from annotations under %s",
                     num_classes,
                     root,
                 )
             else:
-                class_names = COCO_CLASSES
-                num_classes = 90
+                raise RuntimeError(
+                    f"Could not read class names from any COCO JSON under {root}. "
+                    "Expected a file with a \"categories\" list, e.g. "
+                    "train/_annotations.coco.json, annotations_VisDrone_train.json, "
+                    "annotations/instances_train2017.json, or val/_annotations.coco.json."
+                )
         else:
             raise ValueError(f"Invalid dataset file: {config.dataset_file}")
 
+        # ``build_model`` / ``LWDETR`` use ``args.num_classes + 1`` logits; head resize must match.
         if self.model_config.num_classes != num_classes:
-            self.model.reinitialize_detection_head(num_classes)
+            self.model.reinitialize_detection_head(num_classes + 1)
 
         train_config = config.dict()
         model_config = self.model_config.dict()
@@ -216,6 +211,8 @@ class RFDETRV2:
                 kwargs.pop(k)
 
         all_kwargs = {**model_config, **train_config, **kwargs, "num_classes": num_classes}
+        if label_to_cat_id is not None:
+            all_kwargs["label_to_cat_id"] = label_to_cat_id
         # ``train_config`` may contain ``coco_path=None``; that would win over kwargs after the pop loop.
         if all_kwargs.get("coco_path") is None:
             all_kwargs["coco_path"] = getattr(config, "coco_path", None) or config.dataset_dir
@@ -269,13 +266,22 @@ class RFDETRV2:
     @property
     def class_names(self):
         """
-        Retrieve the class names supported by the loaded model.
+        Class names for inference / visualization.
 
-        Returns:
-            dict: A dictionary mapping class IDs to class names. The keys are integers starting from
+        After training, names come from the dataset (``Model.class_names`` list and optional
+        ``label_to_cat_id`` on ``Model.args``). Keys are COCO ``category_id`` when
+        ``label_to_cat_id`` is set; otherwise contiguous ``1..K``.
         """
-        if hasattr(self.model, 'class_names') and self.model.class_names:
-            return {i+1: name for i, name in enumerate(self.model.class_names)}
+        if hasattr(self.model, "class_names") and self.model.class_names:
+            raw = self.model.class_names
+            if isinstance(raw, dict):
+                return raw
+            names = list(raw)
+            args = getattr(self.model, "args", None)
+            lid = getattr(args, "label_to_cat_id", None) if args is not None else None
+            if lid is not None and len(lid) == len(names):
+                return {int(cid): str(n) for cid, n in zip(lid, names)}
+            return {i + 1: str(n) for i, n in enumerate(names)}
 
         return COCO_CLASSES
 

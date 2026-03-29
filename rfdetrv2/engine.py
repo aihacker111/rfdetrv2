@@ -538,7 +538,7 @@ Train and eval functions used in main.py
 """
 import math
 import random
-from typing import Iterable
+from typing import Iterable, List, Sequence
 
 import torch
 import torch.nn.functional as F
@@ -1113,6 +1113,28 @@ def coco_extended_metrics(coco_eval):
         "recall"   : best['macro_recall'],
     }
 
+def map_eval_labels_to_coco_category_ids(
+    results_all: List[dict],
+    label_to_cat_id: Sequence[int],
+) -> List[dict]:
+    """Map model class indices 0..K-1 to COCO ``category_id`` for pycocotools evaluation."""
+    if not label_to_cat_id:
+        return results_all
+    out: List[dict] = []
+    for res in results_all:
+        if "labels" not in res:
+            out.append(res)
+            continue
+        labels = res["labels"]
+        mapped = torch.tensor(
+            [label_to_cat_id[int(x.item())] for x in labels],
+            dtype=labels.dtype,
+            device=labels.device,
+        )
+        out.append({**res, "labels": mapped})
+    return out
+
+
 def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=None):
     model.eval()
     if args.fp16_eval:
@@ -1175,6 +1197,9 @@ def evaluate(model, criterion, postprocess, data_loader, base_ds, device, args=N
 
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         results_all = postprocess(outputs, orig_target_sizes)
+        lid = getattr(args, "label_to_cat_id", None)
+        if lid is not None:
+            results_all = map_eval_labels_to_coco_category_ids(results_all, lid)
         res = {
             target["image_id"].item(): output
             for target, output in zip(targets, results_all)

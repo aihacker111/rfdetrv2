@@ -72,12 +72,23 @@ class CocoDetection(torchvision.datasets.CocoDetection):
         self._transforms = transforms
         self.include_masks = include_masks
         self.prepare = ConvertCoco(include_masks=include_masks)
+        # Raw COCO category_id → contiguous 0..K-1 (SetCriterion / scatter expect this range).
+        cat_ids = sorted(int(x) for x in self.coco.getCatIds())
+        self._cat_id_to_label = {cid: i for i, cid in enumerate(cat_ids)}
 
     def __getitem__(self, idx: int) -> Tuple[Any, Any]:
         img, target = super(CocoDetection, self).__getitem__(idx)
         image_id = self.ids[idx]
         target = {'image_id': image_id, 'annotations': target}
         img, target = self.prepare(img, target)
+        if "labels" in target and target["labels"].numel() > 0:
+            labels = target["labels"]
+            mapped = torch.tensor(
+                [self._cat_id_to_label[int(x.item())] for x in labels],
+                dtype=labels.dtype,
+                device=labels.device,
+            )
+            target["labels"] = mapped
         if self._transforms is not None:
             img, target = self._transforms(img, target)
         return img, target
@@ -235,11 +246,44 @@ def make_coco_transforms_square_div_64(image_set: str, resolution: int, multi_sc
     raise ValueError(f'unknown {image_set}')
 
 
-def resolve_coco_train_annotation_path(root: Union[str, Path]) -> Optional[Path]:
-    """Return the COCO JSON path used for the train split, if it exists.
+def _json_has_categories(path: Path) -> bool:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return bool(data.get("categories"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return False
 
-    Order matches common layouts (Roboflow, VisDrone-style, MS COCO).
+
+def resolve_coco_annotation_path_for_categories(root: Union[str, Path]) -> Optional[Path]:
+    """Find a COCO JSON that contains ``categories`` (train, val, or any split).
+
+    Used to infer class names and ``num_classes`` without hardcoding MS-COCO labels.
     """
+    root = Path(root)
+    candidates = [
+        root / "train" / "_annotations.coco.json",
+        root / "annotations_VisDrone_train.json",
+        root / "annotations_VisDrone_val.json",
+        root / "annotations" / "instances_train2017.json",
+        root / "annotations" / "instances_val2017.json",
+        root / "val" / "_annotations.coco.json",
+        root / "valid" / "_annotations.coco.json",
+        root / "test" / "_annotations.coco.json",
+    ]
+    for p in candidates:
+        if p.is_file() and _json_has_categories(p):
+            return p
+    ann_dir = root / "annotations"
+    if ann_dir.is_dir():
+        for p in sorted(ann_dir.glob("*.json")):
+            if p.is_file() and _json_has_categories(p):
+                return p
+    return None
+
+
+def resolve_coco_train_annotation_path(root: Union[str, Path]) -> Optional[Path]:
+    """Return a train-split COCO JSON path if it exists (narrower than categories resolver)."""
     root = Path(root)
     candidates = [
         root / "train" / "_annotations.coco.json",
@@ -249,16 +293,19 @@ def resolve_coco_train_annotation_path(root: Union[str, Path]) -> Optional[Path]
     for p in candidates:
         if p.is_file():
             return p
-    return None
+    return resolve_coco_annotation_path_for_categories(root)
 
 
-def infer_coco_num_classes_and_names(root: Union[str, Path]) -> Optional[Tuple[List[str], int]]:
-    """Read categories from the train COCO JSON and return (class_names, num_classes).
+def infer_coco_num_classes_and_names(
+    root: Union[str, Path],
+) -> Optional[Tuple[List[str], int, List[int]]]:
+    """Read categories from the train COCO JSON.
 
-    ``num_classes`` matches how labels appear in annotations (sparse COCO ids or 0-based).
-    Returns ``None`` if no known annotation file exists.
+    Returns ``(class_names, num_classes, label_to_cat_id)`` where ``num_classes`` is **K**
+    (the number of foreground classes). Training uses contiguous labels ``0..K-1`` via
+    :class:`CocoDetection`; ``label_to_cat_id[i]`` is the COCO ``category_id`` for index ``i``.
     """
-    ann_path = resolve_coco_train_annotation_path(root)
+    ann_path = resolve_coco_annotation_path_for_categories(root)
     if ann_path is None:
         return None
     try:
@@ -271,14 +318,11 @@ def infer_coco_num_classes_and_names(root: Union[str, Path]) -> Optional[Tuple[L
         return None
     categories = sorted(categories, key=lambda c: int(c["id"]))
     class_names = [str(c.get("name", "")) for c in categories]
-    category_ids = [int(c["id"]) for c in categories if "id" in c]
-    if not category_ids:
+    label_to_cat_id = [int(c["id"]) for c in categories if "id" in c]
+    if not label_to_cat_id:
         return None
-    lo, hi = min(category_ids), max(category_ids)
-    # Labels in the dataset are raw category_id. Output dim must cover max(label).
-    # 0-based ids → num_classes = hi + 1; 1-based / MS COCO sparse (1..90) → num_classes = hi.
-    num_classes = hi + 1 if lo == 0 else hi
-    return class_names, num_classes
+    num_classes = len(categories)
+    return class_names, num_classes, label_to_cat_id
 
 
 def build_coco(image_set: str, args: Any, resolution: int) -> CocoDetection:
