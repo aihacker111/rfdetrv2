@@ -1,3 +1,62 @@
+"""MS COCO category ids → names, plus helpers to load ``{id: name}`` from any COCO JSON."""
+import json
+from pathlib import Path
+from typing import Dict, Optional
+
+
+def load_classes_from_coco_json(json_path: str) -> Dict[int, str]:
+    """Load ``{category_id: name}`` from any COCO-format JSON file."""
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return {int(c["id"]): str(c["name"]) for c in data.get("categories", [])}
+
+
+def infer_classes_from_dataset_dir(dataset_dir: str) -> Optional[Dict[int, str]]:
+    """
+    Auto-detect class names from a COCO-format dataset root.
+    Returns ``{category_id: name}`` or ``None`` if no annotation file is found.
+    """
+    root = Path(dataset_dir)
+    candidates = [
+        root / "train" / "_annotations.coco.json",
+        root / "annotations_VisDrone_train.json",
+        root / "annotations_VisDrone_val.json",
+        root / "annotations" / "instances_train2017.json",
+        root / "annotations" / "instances_val2017.json",
+        root / "val" / "_annotations.coco.json",
+        root / "valid" / "_annotations.coco.json",
+        root / "test" / "_annotations.coco.json",
+    ]
+    for p in candidates:
+        if p.is_file():
+            try:
+                classes = load_classes_from_coco_json(str(p))
+                if classes:
+                    return classes
+            except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+                continue
+    ann_dir = root / "annotations"
+    if ann_dir.is_dir():
+        for p in sorted(ann_dir.glob("*.json")):
+            try:
+                classes = load_classes_from_coco_json(str(p))
+                if classes:
+                    return classes
+            except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+                continue
+    return None
+
+
+def coco_classes_for_dataset(dataset_dir: Optional[str] = None) -> Dict[int, str]:
+    """Prefer dataset JSON when ``dataset_dir`` is set; otherwise MS-COCO defaults."""
+    if dataset_dir:
+        inferred = infer_classes_from_dataset_dir(dataset_dir)
+        if inferred:
+            return inferred
+    return COCO_CLASSES
+
+
+# MS COCO 2017 val (80 classes; sparse category ids 1–90).
 COCO_CLASSES = {
     1: "person",
     2: "bicycle",

@@ -19,6 +19,7 @@ COCO dataset which returns image_id for evaluation.
 Mostly copy-paste from https://github.com/pytorch/vision/blob/13b35ff/references/detection/coco_utils.py
 """
 import json
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -29,6 +30,8 @@ import torchvision
 from PIL import Image
 
 import rfdetrv2.datasets.transforms as T
+
+logger = logging.getLogger(__name__)
 
 
 def compute_multi_scale_scales(resolution: int, expanded_scales: bool = False, patch_size: int = 16, num_windows: int = 4) -> List[int]:
@@ -325,46 +328,128 @@ def infer_coco_num_classes_and_names(
     return class_names, num_classes, label_to_cat_id
 
 
-def build_coco(image_set: str, args: Any, resolution: int) -> CocoDetection:
-    root = Path(args.coco_path)
-    assert root.exists(), f'provided COCO path {root} does not exist'
-    mode = 'instances'
-    # PATHS = {
-    #     "train": (root / "train2017", root / "annotations" / f'{mode}_train2017.json'),
-    #     "val": (root /  "val2017", root / "annotations" / f'{mode}_val2017.json'),
-    #     "test": (root / "val2017", root / "annotations" / f'{mode}_val2017.json'),
-    # }
-    PATHS = {
-        "train": (root / "train", root / 'annotations_VisDrone_train.json'),
-        "val": (root /  "val", root / 'annotations_VisDrone_val.json'),
-        "test": (root / "val", root / 'annotations_VisDrone_val.json'),
+def _resolve_build_coco_ann_and_images(root: Path, split: str) -> Tuple[Path, Path]:
+    """Pick (image_folder, annotation_json) for train / val / test layouts (COCO, VisDrone, Roboflow, etc.)."""
+    ann_candidates = {
+        "train": [
+            root / "train" / "_annotations.coco.json",
+            root / "annotations_VisDrone_train.json",
+            root / "annotations" / "instances_train2017.json",
+            root / "annotations" / "train.json",
+        ],
+        "val": [
+            root / "val" / "_annotations.coco.json",
+            root / "valid" / "_annotations.coco.json",
+            root / "annotations_VisDrone_val.json",
+            root / "annotations" / "instances_val2017.json",
+            root / "annotations" / "val.json",
+        ],
+        "test": [
+            root / "test" / "_annotations.coco.json",
+            root / "val" / "_annotations.coco.json",
+            root / "valid" / "_annotations.coco.json",
+            root / "annotations_VisDrone_val.json",
+            root / "annotations" / "instances_val2017.json",
+            root / "annotations" / "val.json",
+        ],
+    }
+    img_candidates = {
+        "train": [
+            root / "train",
+            root / "train2017",
+            root / "images" / "train",
+            root / "images",
+        ],
+        "val": [
+            root / "val",
+            root / "val2017",
+            root / "images" / "val",
+            root / "valid",
+            root / "images",
+        ],
+        "test": [
+            root / "test",
+            root / "val2017",
+            root / "images" / "test",
+            root / "valid",
+            root / "images",
+        ],
     }
 
-    img_folder, ann_file = PATHS[image_set.split("_")[0]]
+    ann_file: Optional[Path] = None
+    for p in ann_candidates.get(split, []):
+        if p.is_file() and _json_has_categories(p):
+            ann_file = p
+            break
+    if ann_file is None:
+        ann_dir = root / "annotations"
+        if ann_dir.is_dir():
+            for p in sorted(ann_dir.glob("*.json")):
+                if p.is_file() and _json_has_categories(p):
+                    name_l = p.name.lower()
+                    if split == "train" and ("train" in name_l or "instances_train" in name_l):
+                        ann_file = p
+                        break
+                    if split in ("val", "test") and ("val" in name_l or "instances_val" in name_l):
+                        ann_file = p
+                        break
+            if ann_file is None:
+                for p in sorted(ann_dir.glob("*.json")):
+                    if p.is_file() and _json_has_categories(p):
+                        ann_file = p
+                        break
 
-    square_resize_div_64 = getattr(args, 'square_resize_div_64', False)
+    if ann_file is None:
+        raise FileNotFoundError(
+            f"Cannot find a COCO annotation JSON with categories for split={split!r} under {root}. "
+            f"Tried: {[str(p) for p in ann_candidates.get(split, [])]}"
+        )
 
-    if square_resize_div_64:
-        dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms_square_div_64(
-            image_set,
-            resolution,
-            multi_scale=args.multi_scale,
-            expanded_scales=args.expanded_scales,
-            skip_random_resize=not args.do_random_resize_via_padding,
-            patch_size=args.patch_size,
-            num_windows=args.num_windows
-        ))
-    else:
-        dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(
-            image_set,
-            resolution,
-            multi_scale=args.multi_scale,
-            expanded_scales=args.expanded_scales,
-            skip_random_resize=not args.do_random_resize_via_padding,
-            patch_size=args.patch_size,
-            num_windows=args.num_windows
-        ))
-    return dataset
+    img_folder: Optional[Path] = None
+    for p in img_candidates.get(split, []):
+        if p.is_dir():
+            img_folder = p
+            break
+    if img_folder is None:
+        img_folder = root
+
+    return img_folder, ann_file
+
+
+def build_coco(image_set: str, args: Any, resolution: int) -> CocoDetection:
+    """Build a COCO-format dataset; annotation and image paths are auto-detected."""
+    root = Path(args.coco_path)
+    assert root.exists(), f"provided COCO path {root} does not exist"
+    split = image_set.split("_")[0]
+    img_folder, ann_file = _resolve_build_coco_ann_and_images(root, split)
+    logger.info("build_coco split=%s images=%s ann=%s", split, img_folder, ann_file)
+
+    square_resize_div_64 = getattr(args, "square_resize_div_64", False)
+    include_masks = getattr(args, "segmentation_head", False)
+    multi_scale = getattr(args, "multi_scale", False)
+    expanded_scales = getattr(args, "expanded_scales", False)
+    skip_random_resize = not getattr(args, "do_random_resize_via_padding", False)
+    patch_size = getattr(args, "patch_size", 16)
+    num_windows = getattr(args, "num_windows", 4)
+
+    transform_fn = (
+        make_coco_transforms_square_div_64 if square_resize_div_64 else make_coco_transforms
+    )
+    transforms = transform_fn(
+        image_set,
+        resolution,
+        multi_scale=multi_scale,
+        expanded_scales=expanded_scales,
+        skip_random_resize=skip_random_resize,
+        patch_size=patch_size,
+        num_windows=num_windows,
+    )
+    return CocoDetection(
+        img_folder,
+        ann_file,
+        transforms=transforms,
+        include_masks=include_masks,
+    )
 
 def build_roboflow_from_coco(image_set: str, args: Any, resolution: int) -> CocoDetection:
     """Build a Roboflow COCO-format dataset.
