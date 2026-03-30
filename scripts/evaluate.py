@@ -29,8 +29,8 @@ from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
 from rfdetrv2 import RFDETRBase, RFDETRLarge, RFDETRNano, RFDETRSmall
-from rfdetrv2.datasets.coco_eval import patched_pycocotools_summarize
-from rfdetrv2.util.dinov3_pretrained import resolve_pretrained_encoder_path
+from rfdetrv2.data.coco_eval import patched_pycocotools_summarize
+from rfdetrv2.utils.dinov3_pretrained import resolve_pretrained_encoder_path
 
 # DINOv3 pretrained weights
 DINO_WEIGHTS_BY_SIZE = {

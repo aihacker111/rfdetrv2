@@ -4,16 +4,18 @@ import os
 import sys
 
 import cv2
-import numpy as np
 import supervision as sv
 
 project_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(project_root))
 
-from rfdetrv2 import RFDETRBase, RFDETRLarge, RFDETRNano, RFDETRSmall
-from rfdetrv2.util.dinov3_pretrained import resolve_pretrained_encoder_path
+from rfdetrv2.detr._util import pydantic_dump
+from rfdetrv2.runner import Pipeline
+from rfdetrv2.schemas import RFDETRBaseConfig, RFDETRLargeConfig, RFDETRNanoConfig, RFDETRSmallConfig
+from rfdetrv2.utils.coco_classes import COCO_CLASSES
+from rfdetrv2.utils.detection_io import merge_overlapping_detections, resolve_class_label
+from rfdetrv2.utils.dinov3_pretrained import resolve_pretrained_encoder_path
 
-# DINOv3 pretrained weights — used when building model (checkpoint may override)
 DINO_WEIGHTS_BY_SIZE = {
     "nano": "dinov3_vits16_pretrain_lvd1689m-08c60483.pth",
     "small": "dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth",
@@ -21,72 +23,13 @@ DINO_WEIGHTS_BY_SIZE = {
     "large": "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
 }
 DEFAULT_PRETRAINED = os.environ.get("PRETRAINED_ENCODER")
-from rfdetrv2.util.coco_classes import COCO_CLASSES
 
-
-def _get_class_name(cls_id: int, class_names: dict, use_coco_fallback: bool = True) -> str:
-    """Resolve a human-readable class name from a raw model class id.
-
-    model.class_names can be in three formats:
-      A) {0: "person", 1: "bicycle", ...}  — 0-indexed string values  → use directly
-      B) {1: "person", 2: "bicycle", ...}  — 1-indexed string values  → use directly
-      C) {0: 1, 1: 2, 17: 18, 18: 19, ...} — int remapping dict       → IGNORE,
-         fall through to COCO_CLASSES with the raw id instead
-
-    For format C (RF-DETR default), the raw id IS already the correct COCO 1-indexed key:
-      raw=18 → COCO_CLASSES[18] = "dog"  ✓
-    """
-    raw = int(cls_id)
-
-    # Only trust class_names values when they are actual name strings
-    for key in (raw, raw + 1):
-        val = class_names.get(key)
-        if isinstance(val, str):
-            return val
-
-    # class_names has int values (remapping dict) or no match — use COCO directly
-    if use_coco_fallback:
-        if raw in COCO_CLASSES:
-            return COCO_CLASSES[raw]        # e.g. 18 → "dog"
-        if (raw + 1) in COCO_CLASSES:
-            return COCO_CLASSES[raw + 1]
-
-    return str(raw)
-
-
-def _merge_overlapping_detections(detections: sv.Detections, labels: list, box_eps: float = 2.0):
-    """Merge detections with identical boxes so both labels are visible (stacked)."""
-    if len(detections) == 0:
-        return detections, labels
-    xyxy = np.asarray(detections.xyxy)
-    conf = np.asarray(detections.confidence)
-    cls_id = np.asarray(detections.class_id)
-    merged_xyxy, merged_conf, merged_cls, merged_labels = [], [], [], []
-    used = [False] * len(detections)
-    for i in range(len(detections)):
-        if used[i]:
-            continue
-        box = xyxy[i]
-        group = [i]
-        for j in range(i + 1, len(detections)):
-            if used[j]:
-                continue
-            if np.all(np.abs(xyxy[j] - box) < box_eps):
-                group.append(j)
-                used[j] = True
-        used[i] = True
-        merged_xyxy.append(box)
-        merged_conf.append(conf[group[0]])
-        merged_cls.append(cls_id[group[0]])
-        merged_labels.append("\n".join(labels[k] for k in group))
-    return (
-        sv.Detections(
-            xyxy=np.array(merged_xyxy),
-            confidence=np.array(merged_conf),
-            class_id=np.array(merged_cls),
-        ),
-        merged_labels,
-    )
+_CONFIGS = {
+    "nano": RFDETRNanoConfig,
+    "small": RFDETRSmallConfig,
+    "base": RFDETRBaseConfig,
+    "large": RFDETRLargeConfig,
+}
 
 
 def main() -> None:
@@ -117,7 +60,6 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Resolve pretrained encoder: CLI > env > dinov3_pretrained/<model>.pth | project_root | auto-download
     explicit = args.pretrained_encoder or DEFAULT_PRETRAINED
     pretrained = resolve_pretrained_encoder_path(
         project_root,
@@ -126,31 +68,23 @@ def main() -> None:
         weights_by_size=DINO_WEIGHTS_BY_SIZE,
     )
 
-    model_cls = {
-        "nano": RFDETRNano,
-        "small": RFDETRSmall,
-        "base": RFDETRBase,
-        "large": RFDETRLarge,
-    }[args.model_size]
-    model = model_cls(
+    model_cfg = _CONFIGS[args.model_size](
         pretrain_weights=args.weights,
         pretrained_encoder=pretrained,
         device=args.device,
     )
-    detections = model.predict(args.image, threshold=args.threshold)
-    print(model.class_names)
+    pipe = Pipeline(**pydantic_dump(model_cfg))
+    detections = pipe.predict(args.image, threshold=args.threshold)
+    class_names = getattr(pipe, "class_names", None) or COCO_CLASSES
     if args.classes_file:
         with open(args.classes_file) as f:
             names = [line.strip() for line in f if line.strip()]
         class_names = {i + 1: n for i, n in enumerate(names)}
-    else:
-        class_names = model.class_names or COCO_CLASSES
 
-    # Debug: show class_names format so mapping issues are visible
     if class_names and class_names is not COCO_CLASSES:
         sample = dict(list(class_names.items())[:3])
         val_types = {type(v).__name__ for v in list(class_names.values())[:5]}
-        print(f"[debug] model.class_names sample={sample} value_types={val_types}")
+        print(f"[debug] class_names sample={sample} value_types={val_types}")
 
     print(f"Detections: {len(detections)}")
     for i, (xyxy, conf, cls_id) in enumerate(
@@ -158,7 +92,7 @@ def main() -> None:
         start=1,
     ):
         cls_int = int(cls_id)
-        cls_name = _get_class_name(cls_int, class_names)
+        cls_name = resolve_class_label(cls_int, class_names)
         x1, y1, x2, y2 = [float(v) for v in xyxy]
         print(
             f"{i:03d} | class={cls_name} (id={cls_int}) | conf={float(conf):.4f} "
@@ -171,10 +105,10 @@ def main() -> None:
             raise FileNotFoundError(f"Could not read input image: {args.image}")
 
         labels = [
-            f"{_get_class_name(int(cid), class_names)} {float(conf):.2f}"
+            f"{resolve_class_label(int(cid), class_names)} {float(conf):.2f}"
             for conf, cid in zip(detections.confidence, detections.class_id)
         ]
-        draw_detections, draw_labels = _merge_overlapping_detections(detections, labels)
+        draw_detections, draw_labels = merge_overlapping_detections(detections, labels)
 
         box_annotator = sv.BoxAnnotator()
         label_annotator = sv.LabelAnnotator(

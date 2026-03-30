@@ -23,7 +23,7 @@ _DINOV3_PRETRAINED_PATH = _ROOT / "rfdetrv2" / "util" / "dinov3_pretrained.py"
 
 def _load_dinov3_pretrained():
     """Import the module by file path (avoids ``import rfdetrv2`` side effects)."""
-    name = "rfdetrv2.util.dinov3_pretrained"
+    name = "rfdetrv2.utils.dinov3_pretrained"
     spec = importlib.util.spec_from_file_location(name, _DINOV3_PRETRAINED_PATH)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Cannot load {_DINOV3_PRETRAINED_PATH}")

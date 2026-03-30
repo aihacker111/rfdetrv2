@@ -39,7 +39,7 @@ def _get_class_name(cls_id: int, class_names: dict, use_coco_fallback: bool = Tr
 
     Với format C, raw id là COCO category_id: raw=18 → "dog".
     """
-    from rfdetrv2.util.coco_classes import COCO_CLASSES
+    from rfdetrv2.utils.coco_classes import COCO_CLASSES
 
     raw = int(cls_id)
     for key in (raw, raw + 1):
@@ -285,8 +285,8 @@ def run_real_model_forward(weights_path, image_path, model_size='base', threshol
     import torchvision.transforms.functional as F_tv
 
     from rfdetrv2 import RFDETRBase, RFDETRSmall, RFDETRNano, RFDETRLarge
-    from rfdetrv2.util.coco_classes import COCO_CLASSES
-    from rfdetrv2.util.dinov3_pretrained import resolve_pretrained_encoder_path
+    from rfdetrv2.utils.coco_classes import COCO_CLASSES
+    from rfdetrv2.utils.dinov3_pretrained import resolve_pretrained_encoder_path
 
     DINO_WEIGHTS = {
         "nano": "dinov3_vits16_pretrain_lvd1689m-08c60483.pth",

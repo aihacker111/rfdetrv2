@@ -31,8 +31,8 @@ project_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(project_root))
 
 from rfdetrv2 import RFDETRBase, RFDETRLarge, RFDETRNano, RFDETRSmall
-from rfdetrv2.util.coco_classes import COCO_CLASSES
-from rfdetrv2.util.dinov3_pretrained import resolve_pretrained_encoder_path
+from rfdetrv2.utils.coco_classes import COCO_CLASSES
+from rfdetrv2.utils.dinov3_pretrained import resolve_pretrained_encoder_path
 
 DINO_WEIGHTS_BY_SIZE = {
     "nano":  "dinov3_vits16_pretrain_lvd1689m-08c60483.pth",

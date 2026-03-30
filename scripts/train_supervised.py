@@ -17,7 +17,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from rfdetrv2 import RFDETRBase, RFDETRLarge, RFDETRNano, RFDETRSmall
-from rfdetrv2.util.dinov3_pretrained import resolve_pretrained_encoder_path
+from rfdetrv2.utils.dinov3_pretrained import resolve_pretrained_encoder_path
 
 # ---------------------------------------------------------------------------
 # Defaults (override with CLI or env: DATASET_DIR, OUTPUT_DIR, PRETRAINED_ENCODER)
@@ -95,6 +95,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Freeze DINOv3 backbone (no encoder gradients)",
     )
+    model.add_argument(
+        "--freeze-decoder",
+        action="store_true",
+        help="Freeze transformer decoder parameters",
+    )
+    model.add_argument(
+        "--freeze-detection-head",
+        action="store_true",
+        help="Freeze class/bbox/query embedding heads",
+    )
 
     opt = p.add_argument_group("optimizer / schedule")
     opt.add_argument(
@@ -155,7 +165,6 @@ def main() -> None:
     model_kw = dict(
         pretrained_encoder=pretrained_path,
         use_windowed_attn=args.use_windowed_attn,
-        use_rsa=False,
         use_convnext_projector=use_convnext,
         freeze_encoder=args.freeze_encoder,
     )
@@ -199,6 +208,8 @@ def main() -> None:
         prototype_use_quality_weight=args.prototype_use_quality_weight,
         prototype_use_repulsion=args.prototype_use_repulsion,
         freeze_encoder=args.freeze_encoder,
+        freeze_decoder=args.freeze_decoder,
+        freeze_detection_head=args.freeze_detection_head,
     )
 
 

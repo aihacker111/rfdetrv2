@@ -27,8 +27,8 @@ from scipy.optimize import linear_sum_assignment
 from torch import nn
 
 from rfdetrv2.models.segmentation_head import point_sample
-from rfdetrv2.util.box_ops import batch_dice_loss, batch_sigmoid_ce_loss, box_cxcywh_to_xyxy, generalized_box_iou
-from rfdetrv2.util.logger import get_logger
+from rfdetrv2.utils.box_ops import batch_dice_loss, batch_sigmoid_ce_loss, box_cxcywh_to_xyxy, generalized_box_iou
+from rfdetrv2.utils.logger import get_logger
 
 logger = get_logger()
 _SANITIZED_COST_MARGIN = 1.0
@@ -247,21 +247,20 @@ class HungarianMatcher(nn.Module):
         return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
 
 
-def build_matcher(args):
-    if args.segmentation_head:
+def build_matcher(cfg):
+    if cfg.segmentation_head:
         return HungarianMatcher(
-            cost_class=args.set_cost_class,
-            cost_bbox=args.set_cost_bbox,
-            cost_giou=args.set_cost_giou,
-            focal_alpha=args.focal_alpha,
-            cost_mask_ce=args.mask_ce_loss_coef,
-            cost_mask_dice=args.mask_dice_loss_coef,
-            mask_point_sample_ratio=args.mask_point_sample_ratio,
+            cost_class=cfg.set_cost_class,
+            cost_bbox=cfg.set_cost_bbox,
+            cost_giou=cfg.set_cost_giou,
+            focal_alpha=cfg.focal_alpha,
+            cost_mask_ce=cfg.mask_ce_loss_coef,
+            cost_mask_dice=cfg.mask_dice_loss_coef,
+            mask_point_sample_ratio=cfg.mask_point_sample_ratio,
         )
-    else:
-        return HungarianMatcher(
-            cost_class=args.set_cost_class,
-            cost_bbox=args.set_cost_bbox,
-            cost_giou=args.set_cost_giou,
-            focal_alpha=args.focal_alpha,
-        )
+    return HungarianMatcher(
+        cost_class=cfg.set_cost_class,
+        cost_bbox=cfg.set_cost_bbox,
+        cost_giou=cfg.set_cost_giou,
+        focal_alpha=cfg.focal_alpha,
+    )

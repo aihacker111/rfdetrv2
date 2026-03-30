@@ -3,31 +3,47 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-# Modified from LW-DETR (https://github.com/Atten4Vis/LW-DETR)
-# Copyright (c) 2024 Baidu. All Rights Reserved.
-# ------------------------------------------------------------------------
-# Modified from Conditional DETR (https://github.com/Atten4Vis/ConditionalDETR)
-# Copyright (c) 2021 Microsoft. All Rights Reserved.
-# ------------------------------------------------------------------------
-# Modified from DETR (https://github.com/facebookresearch/detr)
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
-# ------------------------------------------------------------------------
-# Modified from Deformable DETR (https://github.com/fundamentalvision/Deformable-DETR)
-# Copyright (c) 2020 SenseTime. All Rights Reserved.
-# ------------------------------------------------------------------------
 
 """
-LW-DETR model and criterion classes
+LW-DETR model and criterion classes.
+
+Thay đổi so với bản trước
+--------------------------
+[REPLACE] loss_query_contrastive (InfoNCE) → loss_prototype_align
+
+Vấn đề của InfoNCE:
+  - Cần ≥2 instances cùng class trong batch → rare class = zero gradient
+  - Early training: queries chưa matched ổn → signal nhiễu
+  - Late training: loss collapse về 0 khi features đã similar → không học thêm
+  - Phụ thuộc batch composition → không stable giữa các bước
+
+Giải pháp — PrototypeMemory + loss_prototype_align:
+  - Duy trì C class prototypes như EMA buffer (không phải parameter)
+  - Mỗi batch: update prototype của các class xuất hiện trong GT
+  - Loss: cosine similarity giữa query features và GT class prototype
+  - Guarantee: luôn có signal miễn là batch có GT box
+  - Curriculum tự nhiên: prototype chính xác hơn theo thời gian
+  - Compatible với dist training: all_gather features trước khi update
+
+PrototypeMemory:
+  - register_buffer: persist qua steps, không train gradient
+  - EMA momentum = 0.999 (mặc định) — prototype thay đổi chậm, stable
+  - Distributed: gather features từ tất cả GPUs trước khi update
+  - Warmup: 200 steps đầu chỉ update prototype, chưa tính loss
+    (tránh loss sai khi prototype chưa có ý nghĩa)
+  - Temperature scaling: τ=0.1 → hard negatives, học biên class rõ hơn
 """
+
 import copy
 import math
 from typing import Callable
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 
-from rfdetrv2.models.backbone import build_backbone
+from rfdetrv2.nn import build_backbone, build_transformer
 from rfdetrv2.models.matcher import build_matcher
 from rfdetrv2.models.segmentation_head import (
     SegmentationHead,
@@ -35,9 +51,8 @@ from rfdetrv2.models.segmentation_head import (
     get_uncertain_point_coords_with_randomness,
     point_sample,
 )
-from rfdetrv2.models.transformers_cdn import build_transformer
-from rfdetrv2.util import box_ops
-from rfdetrv2.util.misc import (
+from rfdetrv2.utils import box_ops
+from rfdetrv2.utils.misc import (
     NestedTensor,
     accuracy,
     get_world_size,
@@ -46,8 +61,336 @@ from rfdetrv2.util.misc import (
 )
 
 
+# ---------------------------------------------------------------------------
+# PrototypeMemory
+# ---------------------------------------------------------------------------
+
+class PrototypeMemory(nn.Module):
+    """EMA class prototype memory cho query feature alignment.
+ 
+    Cải tiến so với v1:
+    [ENH-1] Adaptive momentum: 0.99 → momentum theo training progress
+            Early training: update nhanh hơn (prototype chưa ổn định)
+            Late training:  update chậm hơn (giữ stability)
+ 
+    [ENH-2] Class-frequency weighted loss
+            Rare class xuất hiện ít → prototype update ít → weight loss cao hơn
+            Giải quyết vòng lặp bất lợi của rare class
+ 
+    [ENH-3] Dual loss: pull + push
+            Pull: cross-entropy kéo feature về đúng prototype (giống v1)
+            Push: inter-class repulsion đẩy prototypes ra xa nhau
+                  → feature space orthogonal hơn → class boundary rõ hơn
+ 
+    [ENH-4] Prototype quality score
+            Track variance của EMA updates → prototype ổn định → weight loss cao
+            Prototype dao động nhiều → weight loss thấp → ít tin tưởng hơn
+ 
+    Args:
+        num_classes:     số class (không tính background)
+        feat_dim:        dimension của query feature (= hidden_dim)
+        momentum:        EMA decay target. Adaptive từ 0.99 → momentum.
+        warmup_steps:    số bước đầu chỉ update prototype, chưa tính loss.
+        temperature:     τ trong cosine classifier. 0.1 → hard negatives.
+        repulsion_coef:  weight của inter-class repulsion loss [ENH-3].
+                         0.1 là starting point, tăng nếu feature space vẫn overlap.
+        use_freq_weight: bật/tắt class-frequency weighting [ENH-2].
+        use_quality_weight: bật/tắt prototype quality weighting [ENH-4].
+        use_repulsion:   bật/tắt inter-class repulsion [ENH-3].
+    """
+ 
+    def __init__(
+        self,
+        num_classes:        int,
+        feat_dim:           int,
+        momentum:           float = 0.999,
+        warmup_steps:       int   = 200,
+        temperature:        float = 0.1,
+        repulsion_coef:     float = 0.1,
+        use_freq_weight:    bool  = True,
+        use_quality_weight: bool  = True,
+        use_repulsion:      bool  = True,
+    ):
+        super().__init__()
+ 
+        # Core buffers — v1
+        self.register_buffer("prototypes",        torch.zeros(num_classes, feat_dim))
+        self.register_buffer("proto_initialized", torch.zeros(num_classes, dtype=torch.bool))
+        self.register_buffer("step",              torch.tensor(0, dtype=torch.long))
+ 
+        # [ENH-2] Class-frequency tracking
+        self.register_buffer("proto_update_count",
+                             torch.zeros(num_classes, dtype=torch.long))
+ 
+        # [ENH-4] Prototype quality (EMA of update magnitude)
+        # Khởi tạo = 1.0 → quality trung bình, tránh extreme weight lúc đầu
+        self.register_buffer("proto_variance",
+                             torch.ones(num_classes, dtype=torch.float))
+ 
+        self.num_classes        = num_classes
+        self.feat_dim           = feat_dim
+        self.momentum           = momentum
+        self.warmup_steps       = warmup_steps
+        self.temperature        = temperature
+        self.repulsion_coef     = repulsion_coef
+        self.use_freq_weight    = use_freq_weight
+        self.use_quality_weight = use_quality_weight
+        self.use_repulsion      = use_repulsion
+ 
+    # ------------------------------------------------------------------
+    # [ENH-1] Adaptive momentum
+    # ------------------------------------------------------------------
+ 
+    def _get_momentum(self) -> float:
+        """
+        Tăng dần momentum từ 0.99 → self.momentum theo training progress.
+ 
+        Đầu training (step nhỏ): momentum thấp → prototype update nhanh
+        → bắt kịp với features đang thay đổi nhanh.
+ 
+        Cuối training (step lớn): momentum cao → prototype ổn định
+        → tránh oscillation khi model đã converge.
+ 
+        Transition xảy ra trong khoảng warmup_steps × 10 bước đầu.
+        """
+        if self.warmup_steps <= 0:
+            return self.momentum
+        progress = min(1.0, float(self.step.item()) / max(1, self.warmup_steps * 10))
+        # Linear interpolation: 0.99 → self.momentum
+        return 0.99 + (self.momentum - 0.99) * progress
+ 
+    # ------------------------------------------------------------------
+    # Update — EMA per class
+    # ------------------------------------------------------------------
+ 
+    @torch.no_grad()
+    def update(self, features: torch.Tensor, labels: torch.Tensor) -> None:
+        if features.numel() == 0:
+            return
+ 
+        device     = features.device
+        labels     = labels.to(device)
+        feats_norm = F.normalize(features.float().detach(), dim=-1)
+ 
+        # Distributed: gather across GPUs
+        if is_dist_avail_and_initialized():
+            world_size = dist.get_world_size()
+ 
+            local_size = torch.tensor([feats_norm.shape[0]],
+                                      dtype=torch.long, device=device)
+            all_sizes  = [torch.zeros(1, dtype=torch.long, device=device)
+                          for _ in range(world_size)]
+            dist.all_gather(all_sizes, local_size)
+ 
+            max_size = int(max(s.item() for s in all_sizes))
+            max_size = max(0, min(max_size, 65536))
+            if max_size == 0:
+                return
+ 
+            pad_feat  = torch.zeros(max_size, self.feat_dim, device=device)
+            pad_label = torch.full((max_size,), -1,
+                                   dtype=labels.dtype, device=device)
+ 
+            n = feats_norm.shape[0]
+            if n > 0:
+                pad_feat[:n]  = feats_norm
+                pad_label[:n] = labels
+ 
+            all_feats  = [torch.zeros(max_size, self.feat_dim, device=device)
+                          for _ in range(world_size)]
+            all_labels = [torch.zeros(max_size, dtype=labels.dtype, device=device)
+                          for _ in range(world_size)]
+ 
+            dist.all_gather(all_feats,  pad_feat)
+            dist.all_gather(all_labels, pad_label)
+ 
+            feats_norm = torch.cat(all_feats,  dim=0)
+            labels     = torch.cat(all_labels, dim=0)
+            valid      = labels >= 0
+            feats_norm = feats_norm[valid]
+            labels     = labels[valid]
+ 
+        # [ENH-1] Dùng adaptive momentum
+        momentum = self._get_momentum()
+ 
+        for cls_id_t in labels.unique():
+            cls_id   = cls_id_t.item()
+            if cls_id < 0 or cls_id >= self.num_classes:
+                continue
+ 
+            cls_mask = labels == cls_id
+            cls_feat = feats_norm[cls_mask].mean(0)
+ 
+            if not self.proto_initialized[cls_id]:
+                self.prototypes[cls_id]        = cls_feat
+                self.proto_initialized[cls_id] = True
+            else:
+                old_proto = self.prototypes[cls_id].clone()
+ 
+                # EMA update với adaptive momentum
+                self.prototypes[cls_id] = (
+                    momentum * old_proto + (1.0 - momentum) * cls_feat
+                )
+ 
+                # [ENH-4] Track update magnitude → quality score
+                update_mag = (cls_feat - old_proto).norm().item()
+                self.proto_variance[cls_id] = (
+                    0.99 * self.proto_variance[cls_id].item()
+                    + 0.01 * update_mag
+                )
+ 
+            # [ENH-2] Track update count per class
+            self.proto_update_count[cls_id] += 1
+ 
+        self.step += 1
+ 
+    # ------------------------------------------------------------------
+    # [ENH-3] Inter-class repulsion loss
+    # ------------------------------------------------------------------
+ 
+    def _inter_class_repulsion_loss(self) -> torch.Tensor:
+        """
+        Đẩy prototypes ra xa nhau trong embedding space.
+ 
+        Mục tiêu: prototypes của các class khác nhau nên orthogonal
+        (cosine similarity ≈ 0) thay vì gần nhau.
+ 
+        Loss = mean cosine similarity của tất cả cặp prototypes.
+        Minimize → prototypes tách biệt nhau hơn.
+ 
+        Chỉ tính trên initialized prototypes để tránh zero-vector artifacts.
+        """
+        initialized_idx = self.proto_initialized.nonzero(as_tuple=True)[0]
+        if len(initialized_idx) < 2:
+            return torch.tensor(0.0, device=self.prototypes.device)
+ 
+        protos = F.normalize(
+            self.prototypes[initialized_idx].float(), dim=-1
+        )                                                        # (C_init, D)
+        sim    = protos @ protos.T                               # (C_init, C_init)
+ 
+        # Chỉ lấy upper triangle — tránh self-similarity và duplicate pairs
+        mask       = torch.triu(
+            torch.ones_like(sim, dtype=torch.bool), diagonal=1
+        )
+        repulsion  = sim[mask].clamp(min=0).mean()   # penalize positive sim
+        return repulsion
+ 
+    # ------------------------------------------------------------------
+    # Loss
+    # ------------------------------------------------------------------
+ 
+    def loss(
+        self,
+        features: torch.Tensor,
+        labels:   torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Enhanced prototype alignment loss.
+ 
+        Thành phần:
+            L_pull = cross-entropy với cosine classifier (có frequency + quality weight)
+            L_push = inter-class repulsion (optional)
+ 
+        Total: L = L_pull + repulsion_coef * L_push
+ 
+        Args:
+            features: (M, D) — matched query features (raw, chưa normalize)
+            labels:   (M,)  — GT class labels (0-indexed, không tính background)
+ 
+        Returns:
+            scalar loss
+        """
+        if features.numel() == 0 or not self.proto_initialized.any():
+            return features.sum() * 0.0
+ 
+        # Chỉ tính loss sau warmup
+        if self.step < self.warmup_steps:
+            return features.sum() * 0.0
+ 
+        # Lọc những class đã có prototype
+        valid_mask = torch.tensor(
+            [
+                self.proto_initialized[l.item()].item()
+                if 0 <= l.item() < self.num_classes else False
+                for l in labels
+            ],
+            device=features.device,
+        )
+        if not valid_mask.any():
+            return features.sum() * 0.0
+ 
+        feats = features[valid_mask]
+        lbls  = labels[valid_mask]
+ 
+        # Normalize
+        feats_norm  = F.normalize(feats.float(),           dim=-1)   # (M, D)
+        protos_norm = F.normalize(self.prototypes.float(), dim=-1)   # (C, D)
+ 
+        # Cosine logits scaled by temperature
+        logits = feats_norm @ protos_norm.T / self.temperature       # (M, C)
+ 
+        # Per-sample cross-entropy (reduction='none' để apply weights)
+        loss_per_sample = F.cross_entropy(logits, lbls.long(),
+                                          reduction='none')           # (M,)
+ 
+        # ------------------------------------------------------------------
+        # [ENH-2] Class-frequency weight: rare class → higher weight
+        # ------------------------------------------------------------------
+        if self.use_freq_weight:
+            counts      = self.proto_update_count[lbls.long()].float().clamp(min=1)
+            freq_weight = 1.0 / counts
+            freq_weight = freq_weight / freq_weight.mean().clamp(min=1e-8)
+            freq_weight = freq_weight.clamp(max=5.0)   # cap để tránh extreme
+        else:
+            freq_weight = torch.ones_like(loss_per_sample)
+ 
+        # ------------------------------------------------------------------
+        # [ENH-4] Quality weight: stable prototype → higher weight
+        # ------------------------------------------------------------------
+        if self.use_quality_weight:
+            variance      = self.proto_variance[lbls.long()].float().clamp(min=1e-4)
+            quality       = 1.0 / variance
+            quality       = quality / quality.mean().clamp(min=1e-8)
+            quality       = quality.clamp(max=5.0)
+        else:
+            quality = torch.ones_like(loss_per_sample)
+ 
+        # Combine weights
+        combined_weight = (freq_weight * quality)
+        combined_weight = combined_weight / combined_weight.mean().clamp(min=1e-8)
+ 
+        pull_loss = (loss_per_sample * combined_weight).mean()
+ 
+        # ------------------------------------------------------------------
+        # [ENH-3] Inter-class repulsion loss
+        # ------------------------------------------------------------------
+        if self.use_repulsion:
+            push_loss = self._inter_class_repulsion_loss()
+            total_loss = pull_loss + self.repulsion_coef * push_loss
+        else:
+            total_loss = pull_loss
+ 
+        return total_loss
+ 
+    def extra_repr(self) -> str:
+        return (
+            f"num_classes={self.num_classes}, feat_dim={self.feat_dim}, "
+            f"momentum={self.momentum}, warmup_steps={self.warmup_steps}, "
+            f"temperature={self.temperature}, repulsion_coef={self.repulsion_coef}, "
+            f"use_freq_weight={self.use_freq_weight}, "
+            f"use_quality_weight={self.use_quality_weight}, "
+            f"use_repulsion={self.use_repulsion}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# LWDETR
+# ---------------------------------------------------------------------------
+
 class LWDETR(nn.Module):
-    """ This is the Group DETR v3 module that performs object detection """
+    """RF-DETR main model."""
+
     def __init__(self,
                  backbone,
                  transformer,
@@ -59,35 +402,22 @@ class LWDETR(nn.Module):
                  two_stage=False,
                  lite_refpoint_refine=False,
                  bbox_reparam=False):
-        """ Initializes the model.
-        Parameters:
-            backbone: torch module of the backbone to be used. See backbone.py
-            transformer: torch module of the transformer architecture. See transformer.py
-            num_classes: number of object classes
-            num_queries: number of object queries, ie detection slot. This is the maximal number of objects
-                         Conditional DETR can detect in a single image. For COCO, we recommend 100 queries.
-            aux_loss: True if auxiliary decoding losses (loss at each decoder layer) are to be used.
-            group_detr: Number of groups to speed detr training. Default is 1.
-            lite_refpoint_refine: TODO
-        """
         super().__init__()
         self.num_queries = num_queries
         self.transformer = transformer
         hidden_dim = transformer.d_model
         self.class_embed = nn.Linear(hidden_dim, num_classes)
-        self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
+        self.bbox_embed  = MLP(hidden_dim, hidden_dim, 4, 3)
         self.segmentation_head = segmentation_head
 
-        query_dim=4
+        query_dim = 4
         self.refpoint_embed = nn.Embedding(num_queries * group_detr, query_dim)
-        self.query_feat = nn.Embedding(num_queries * group_detr, hidden_dim)
+        self.query_feat     = nn.Embedding(num_queries * group_detr, hidden_dim)
         nn.init.constant_(self.refpoint_embed.weight.data, 0)
-
-        self.backbone = backbone
-        self.aux_loss = aux_loss
+        self.backbone   = backbone
+        self.aux_loss   = aux_loss
         self.group_detr = group_detr
 
-        # iter update
         self.lite_refpoint_refine = lite_refpoint_refine
         if not self.lite_refpoint_refine:
             self.transformer.decoder.bbox_embed = self.bbox_embed
@@ -96,16 +426,13 @@ class LWDETR(nn.Module):
 
         self.bbox_reparam = bbox_reparam
 
-        # init prior_prob setting for focal loss
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
         self.class_embed.bias.data = torch.ones(num_classes) * bias_value
 
-        # init bbox_mebed
         nn.init.constant_(self.bbox_embed.layers[-1].weight.data, 0)
         nn.init.constant_(self.bbox_embed.layers[-1].bias.data, 0)
 
-        # two_stage
         self.two_stage = two_stage
         if self.two_stage:
             self.transformer.enc_out_bbox_embed = nn.ModuleList(
@@ -114,21 +441,21 @@ class LWDETR(nn.Module):
                 [copy.deepcopy(self.class_embed) for _ in range(group_detr)])
 
         self._export = False
+        
+        
+    # ------------------------------------------------------------------
+    # Standard methods
+    # ------------------------------------------------------------------
 
     def reinitialize_detection_head(self, num_classes):
         base = self.class_embed.weight.shape[0]
         num_repeats = int(math.ceil(num_classes / base))
-        self.class_embed.weight.data = self.class_embed.weight.data.repeat(num_repeats, 1)
-        self.class_embed.weight.data = self.class_embed.weight.data[:num_classes]
-        self.class_embed.bias.data = self.class_embed.bias.data.repeat(num_repeats)
-        self.class_embed.bias.data = self.class_embed.bias.data[:num_classes]
-
+        self.class_embed.weight.data = self.class_embed.weight.data.repeat(num_repeats, 1)[:num_classes]
+        self.class_embed.bias.data   = self.class_embed.bias.data.repeat(num_repeats)[:num_classes]
         if self.two_stage:
             for enc_out_class_embed in self.transformer.enc_out_class_embed:
-                enc_out_class_embed.weight.data = enc_out_class_embed.weight.data.repeat(num_repeats, 1)
-                enc_out_class_embed.weight.data = enc_out_class_embed.weight.data[:num_classes]
-                enc_out_class_embed.bias.data = enc_out_class_embed.bias.data.repeat(num_repeats)
-                enc_out_class_embed.bias.data = enc_out_class_embed.bias.data[:num_classes]
+                enc_out_class_embed.weight.data = enc_out_class_embed.weight.data.repeat(num_repeats, 1)[:num_classes]
+                enc_out_class_embed.bias.data   = enc_out_class_embed.bias.data.repeat(num_repeats)[:num_classes]
 
     def export(self):
         self._export = True
@@ -138,28 +465,17 @@ class LWDETR(nn.Module):
             if hasattr(m, "export") and isinstance(m.export, Callable) and hasattr(m, "_export") and not m._export:
                 m.export()
 
-    def forward(self, samples: NestedTensor, targets=None):
-        """ The forward expects a NestedTensor, which consists of:
-               - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
-               - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
 
-            It returns a dict with the following elements:
-               - "pred_logits": the classification logits (including no-object) for all queries.
-                                Shape= [batch_size x num_queries x num_classes]
-               - "pred_boxes": The normalized boxes coordinates for all queries, represented as
-                               (center_x, center_y, width, height). These values are normalized in [0, 1],
-                               relative to the size of each individual image (disregarding possible padding).
-                               See PostProcess for information on how to retrieve the unnormalized bounding box.
-               - "aux_outputs": Optional, only returned when auxilary losses are activated. It is a list of
-                                dictionnaries containing the two above keys for each decoder layer.
-        """
+    def forward(self, samples: NestedTensor, targets=None):
         if isinstance(samples, (list, torch.Tensor)):
             samples = nested_tensor_from_tensor_list(samples)
         features, poss = self.backbone(samples)
 
-        srcs = []
-        masks = []
-        for l, feat in enumerate(features):
+        srcs, masks = [], []
+        for feat in features:
             src, mask = feat.decompose()
             srcs.append(src)
             masks.append(mask)
@@ -167,14 +483,14 @@ class LWDETR(nn.Module):
 
         if self.training:
             refpoint_embed_weight = self.refpoint_embed.weight
-            query_feat_weight = self.query_feat.weight
+            query_feat_weight     = self.query_feat.weight
         else:
-            # only use one group in inference
             refpoint_embed_weight = self.refpoint_embed.weight[:self.num_queries]
-            query_feat_weight = self.query_feat.weight[:self.num_queries]
+            query_feat_weight     = self.query_feat.weight[:self.num_queries]
 
         if self.segmentation_head is not None:
-            seg_head_fwd = self.segmentation_head.sparse_forward if self.training else self.segmentation_head.forward
+            seg_head_fwd = (self.segmentation_head.sparse_forward
+                            if self.training else self.segmentation_head.forward)
 
         hs, ref_unsigmoid, hs_enc, ref_enc = self.transformer(
             srcs, masks, poss, refpoint_embed_weight, query_feat_weight)
@@ -182,11 +498,9 @@ class LWDETR(nn.Module):
         if hs is not None:
             if self.bbox_reparam:
                 outputs_coord_delta = self.bbox_embed(hs)
-                outputs_coord_cxcy = outputs_coord_delta[..., :2] * ref_unsigmoid[..., 2:] + ref_unsigmoid[..., :2]
-                outputs_coord_wh = outputs_coord_delta[..., 2:].exp() * ref_unsigmoid[..., 2:]
-                outputs_coord = torch.concat(
-                    [outputs_coord_cxcy, outputs_coord_wh], dim=-1
-                )
+                outputs_coord_cxcy  = outputs_coord_delta[..., :2] * ref_unsigmoid[..., 2:] + ref_unsigmoid[..., :2]
+                outputs_coord_wh    = outputs_coord_delta[..., 2:].exp() * ref_unsigmoid[..., 2:]
+                outputs_coord       = torch.concat([outputs_coord_cxcy, outputs_coord_wh], dim=-1)
             else:
                 outputs_coord = (self.bbox_embed(hs) + ref_unsigmoid).sigmoid()
 
@@ -196,23 +510,33 @@ class LWDETR(nn.Module):
                 outputs_masks = seg_head_fwd(features[0].tensors, hs, samples.tensors.shape[-2:])
 
             out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
+
+            # Expose last-layer query features cho prototype alignment loss
+            # Chỉ cần khi training — không overhead ở inference
+            if self.training:
+                out['pred_queries'] = hs[-1]   # (B, N, D)
+
             if self.segmentation_head is not None:
                 out['pred_masks'] = outputs_masks[-1]
             if self.aux_loss:
-                out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord, outputs_masks if self.segmentation_head is not None else None)
+                out['aux_outputs'] = self._set_aux_loss(
+                    outputs_class, outputs_coord,
+                    outputs_masks if self.segmentation_head is not None else None,
+                )
 
         if self.two_stage:
-            group_detr = self.group_detr if self.training else 1
+            group_detr  = self.group_detr if self.training else 1
             hs_enc_list = hs_enc.chunk(group_detr, dim=1)
-            cls_enc = []
-            for g_idx in range(group_detr):
-                cls_enc_gidx = self.transformer.enc_out_class_embed[g_idx](hs_enc_list[g_idx])
-                cls_enc.append(cls_enc_gidx)
-
-            cls_enc = torch.cat(cls_enc, dim=1)
+            cls_enc     = torch.cat([
+                self.transformer.enc_out_class_embed[g](hs_enc_list[g])
+                for g in range(group_detr)
+            ], dim=1)
 
             if self.segmentation_head is not None:
-                masks_enc = seg_head_fwd(features[0].tensors, [hs_enc,], samples.tensors.shape[-2:], skip_blocks=True)[0]
+                masks_enc = seg_head_fwd(
+                    features[0].tensors, [hs_enc,],
+                    samples.tensors.shape[-2:], skip_blocks=True,
+                )[0]
 
             if hs is not None:
                 out['enc_outputs'] = {'pred_logits': cls_enc, 'pred_boxes': ref_enc}
@@ -227,60 +551,51 @@ class LWDETR(nn.Module):
 
     def forward_export(self, tensors):
         srcs, _, poss = self.backbone(tensors)
-        # only use one group in inference
         refpoint_embed_weight = self.refpoint_embed.weight[:self.num_queries]
-        query_feat_weight = self.query_feat.weight[:self.num_queries]
+        query_feat_weight     = self.query_feat.weight[:self.num_queries]
 
         hs, ref_unsigmoid, hs_enc, ref_enc = self.transformer(
             srcs, None, poss, refpoint_embed_weight, query_feat_weight)
 
         outputs_masks = None
-
         if hs is not None:
             if self.bbox_reparam:
                 outputs_coord_delta = self.bbox_embed(hs)
-                outputs_coord_cxcy = outputs_coord_delta[..., :2] * ref_unsigmoid[..., 2:] + ref_unsigmoid[..., :2]
-                outputs_coord_wh = outputs_coord_delta[..., 2:].exp() * ref_unsigmoid[..., 2:]
-                outputs_coord = torch.concat(
-                    [outputs_coord_cxcy, outputs_coord_wh], dim=-1
-                )
+                outputs_coord_cxcy  = outputs_coord_delta[..., :2] * ref_unsigmoid[..., 2:] + ref_unsigmoid[..., :2]
+                outputs_coord_wh    = outputs_coord_delta[..., 2:].exp() * ref_unsigmoid[..., 2:]
+                outputs_coord       = torch.concat([outputs_coord_cxcy, outputs_coord_wh], dim=-1)
             else:
                 outputs_coord = (self.bbox_embed(hs) + ref_unsigmoid).sigmoid()
             outputs_class = self.class_embed(hs)
             if self.segmentation_head is not None:
                 outputs_masks = self.segmentation_head(srcs[0], [hs,], tensors.shape[-2:])[0]
         else:
-            assert self.two_stage, "if not using decoder, two_stage must be True"
+            assert self.two_stage
             outputs_class = self.transformer.enc_out_class_embed[0](hs_enc)
             outputs_coord = ref_enc
             if self.segmentation_head is not None:
-                outputs_masks = self.segmentation_head(srcs[0], [hs_enc,], tensors.shape[-2:], skip_blocks=True)[0]
+                outputs_masks = self.segmentation_head(
+                    srcs[0], [hs_enc,], tensors.shape[-2:], skip_blocks=True)[0]
 
         if outputs_masks is not None:
             return outputs_coord, outputs_class, outputs_masks
-        else:
-            return outputs_coord, outputs_class
+        return outputs_coord, outputs_class
 
     @torch.jit.unused
     def _set_aux_loss(self, outputs_class, outputs_coord, outputs_masks):
-        # this is a workaround to make torchscript happy, as torchscript
-        # doesn't support dictionary with non-homogeneous values, such
-        # as a dict having both a Tensor and a list.
         if outputs_masks is not None:
             return [{'pred_logits': a, 'pred_boxes': b, 'pred_masks': c}
                     for a, b, c in zip(outputs_class[:-1], outputs_coord[:-1], outputs_masks[:-1])]
-        else:
-            return [{'pred_logits': a, 'pred_boxes': b}
-                    for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
+        return [{'pred_logits': a, 'pred_boxes': b}
+                for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
 
     def update_drop_path(self, drop_path_rate, vit_encoder_num_layers):
-        """ """
         dp_rates = [x.item() for x in torch.linspace(0, drop_path_rate, vit_encoder_num_layers)]
         for i in range(vit_encoder_num_layers):
-            if hasattr(self.backbone[0].encoder, 'blocks'): # Not aimv2
+            if hasattr(self.backbone[0].encoder, 'blocks'):
                 if hasattr(self.backbone[0].encoder.blocks[i].drop_path, 'drop_prob'):
                     self.backbone[0].encoder.blocks[i].drop_path.drop_prob = dp_rates[i]
-            else: # aimv2
+            else:
                 if hasattr(self.backbone[0].encoder.trunk.blocks[i].drop_path, 'drop_prob'):
                     self.backbone[0].encoder.trunk.blocks[i].drop_path.drop_prob = dp_rates[i]
 
@@ -290,50 +605,47 @@ class LWDETR(nn.Module):
                 module.p = drop_rate
 
 
+# ---------------------------------------------------------------------------
+# SetCriterion
+# ---------------------------------------------------------------------------
+
 class SetCriterion(nn.Module):
-    """ This class computes the loss for Conditional DETR.
-    The process happens in two steps:
-        1) we compute hungarian assignment between ground truth boxes and the outputs of the model
-        2) we supervise each pair of matched ground-truth / prediction (supervise class and box)
-    """
     def __init__(self,
-                num_classes,
-                matcher,
-                weight_dict,
-                focal_alpha,
-                losses,
-                group_detr=1,
-                sum_group_losses=False,
-                use_varifocal_loss=False,
-                use_position_supervised_loss=False,
-                ia_bce_loss=False,
-                mask_point_sample_ratio: int = 16,):
-        """ Create the criterion.
-        Parameters:
-            num_classes: number of object categories, omitting the special no-object category
-            matcher: module able to compute a matching between targets and proposals
-            weight_dict: dict containing as key the names of the losses and as values their relative weight.
-            losses: list of all the losses to be applied. See get_loss for list of available losses.
-            focal_alpha: alpha in Focal Loss
-            group_detr: Number of groups to speed detr training. Default is 1.
-        """
+                 num_classes,
+                 matcher,
+                 weight_dict,
+                 focal_alpha,
+                 losses,
+                 group_detr=1,
+                 sum_group_losses=False,
+                 use_varifocal_loss=False,
+                 use_position_supervised_loss=False,
+                 ia_bce_loss=False,
+                 mask_point_sample_ratio: int = 16,
+                 # Prototype alignment params (thay thế contrastive_temperature)
+                 prototype_memory: PrototypeMemory = None,
+                 prototype_loss_coef: float = 1.0,
+                 ):
         super().__init__()
-        self.num_classes = num_classes
-        self.matcher = matcher
-        self.weight_dict = weight_dict
-        self.losses = losses
-        self.focal_alpha = focal_alpha
-        self.group_detr = group_detr
-        self.sum_group_losses = sum_group_losses
-        self.use_varifocal_loss = use_varifocal_loss
+        self.num_classes                  = num_classes
+        self.matcher                      = matcher
+        self.weight_dict                  = weight_dict
+        self.losses                       = losses
+        self.focal_alpha                  = focal_alpha
+        self.group_detr                   = group_detr
+        self.sum_group_losses             = sum_group_losses
+        self.use_varifocal_loss           = use_varifocal_loss
         self.use_position_supervised_loss = use_position_supervised_loss
-        self.ia_bce_loss = ia_bce_loss
-        self.mask_point_sample_ratio = mask_point_sample_ratio
+        self.ia_bce_loss                  = ia_bce_loss
+        self.mask_point_sample_ratio      = mask_point_sample_ratio
+        self.prototype_memory             = prototype_memory
+        self.prototype_loss_coef          = prototype_loss_coef
+
+    # ------------------------------------------------------------------
+    # Classification loss
+    # ------------------------------------------------------------------
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
-        """Classification loss (Binary focal loss)
-        targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
-        """
         assert 'pred_logits' in outputs
         src_logits = outputs['pred_logits']
 
@@ -343,406 +655,326 @@ class SetCriterion(nn.Module):
         if self.ia_bce_loss:
             alpha = self.focal_alpha
             gamma = 2
-            src_boxes = outputs['pred_boxes'][idx]
+            src_boxes    = outputs['pred_boxes'][idx]
             target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-
-            iou_targets=torch.diag(box_ops.box_iou(
+            iou_targets  = torch.diag(box_ops.box_iou(
                 box_ops.box_cxcywh_to_xyxy(src_boxes.detach()),
                 box_ops.box_cxcywh_to_xyxy(target_boxes))[0])
-            pos_ious = iou_targets.clone().detach()
-            prob = src_logits.sigmoid()
-            #init positive weights and negative weights
+            pos_ious    = iou_targets.clone().detach()
+            prob        = src_logits.sigmoid()
             pos_weights = torch.zeros_like(src_logits)
-            neg_weights =  prob ** gamma
-
-            pos_ind=[id for id in idx]
+            neg_weights = prob ** gamma
+            pos_ind = [id for id in idx]
             pos_ind.append(target_classes_o)
-
             t = prob[pos_ind].pow(alpha) * pos_ious.pow(1 - alpha)
             t = torch.clamp(t, 0.01).detach()
-
             pos_weights[pos_ind] = t.to(pos_weights.dtype)
             neg_weights[pos_ind] = 1 - t.to(neg_weights.dtype)
-            # a reformulation of the standard loss_ce = - pos_weights * prob.log() - neg_weights * (1 - prob).log()
-            # with a focus on statistical stability by using fused logsigmoid
-            loss_ce = neg_weights * src_logits - F.logsigmoid(src_logits) * (pos_weights + neg_weights)
-            loss_ce = loss_ce.sum() / num_boxes
+            loss_ce = (neg_weights * src_logits - F.logsigmoid(src_logits) * (pos_weights + neg_weights)).sum() / num_boxes
 
         elif self.use_position_supervised_loss:
-            src_boxes = outputs['pred_boxes'][idx]
+            src_boxes    = outputs['pred_boxes'][idx]
             target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-
-            iou_targets=torch.diag(box_ops.box_iou(
+            iou_targets  = torch.diag(box_ops.box_iou(
                 box_ops.box_cxcywh_to_xyxy(src_boxes.detach()),
                 box_ops.box_cxcywh_to_xyxy(target_boxes))[0])
-            pos_ious = iou_targets.clone().detach()
-            # pos_ious_func = pos_ious ** 2
-            pos_ious_func = pos_ious
-
-            cls_iou_func_targets = torch.zeros((src_logits.shape[0], src_logits.shape[1],self.num_classes),
-                                        dtype=src_logits.dtype, device=src_logits.device)
-
-            pos_ind=[id for id in idx]
+            pos_ious_func = iou_targets.clone().detach()
+            cls_iou_func_targets = torch.zeros(
+                (src_logits.shape[0], src_logits.shape[1], self.num_classes),
+                dtype=src_logits.dtype, device=src_logits.device)
+            pos_ind = [id for id in idx]
             pos_ind.append(target_classes_o)
             cls_iou_func_targets[pos_ind] = pos_ious_func
-            norm_cls_iou_func_targets = cls_iou_func_targets \
-                / (cls_iou_func_targets.view(cls_iou_func_targets.shape[0], -1, 1).amax(1, True) + 1e-8)
-            loss_ce = position_supervised_loss(src_logits, norm_cls_iou_func_targets, num_boxes, alpha=self.focal_alpha, gamma=2) * src_logits.shape[1]
+            norm_cls = cls_iou_func_targets / (
+                cls_iou_func_targets.view(cls_iou_func_targets.shape[0], -1, 1).amax(1, True) + 1e-8)
+            loss_ce = position_supervised_loss(
+                src_logits, norm_cls, num_boxes, alpha=self.focal_alpha, gamma=2) * src_logits.shape[1]
 
         elif self.use_varifocal_loss:
-            src_boxes = outputs['pred_boxes'][idx]
+            src_boxes    = outputs['pred_boxes'][idx]
             target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
-
-            iou_targets=torch.diag(box_ops.box_iou(
+            iou_targets  = torch.diag(box_ops.box_iou(
                 box_ops.box_cxcywh_to_xyxy(src_boxes.detach()),
                 box_ops.box_cxcywh_to_xyxy(target_boxes))[0])
             pos_ious = iou_targets.clone().detach()
-
-            cls_iou_targets = torch.zeros((src_logits.shape[0], src_logits.shape[1],self.num_classes),
-                                        dtype=src_logits.dtype, device=src_logits.device)
-
-            pos_ind=[id for id in idx]
+            cls_iou_targets = torch.zeros(
+                (src_logits.shape[0], src_logits.shape[1], self.num_classes),
+                dtype=src_logits.dtype, device=src_logits.device)
+            pos_ind = [id for id in idx]
             pos_ind.append(target_classes_o)
             cls_iou_targets[pos_ind] = pos_ious
-            loss_ce = sigmoid_varifocal_loss(src_logits, cls_iou_targets, num_boxes, alpha=self.focal_alpha, gamma=2) * src_logits.shape[1]
+            loss_ce = sigmoid_varifocal_loss(
+                src_logits, cls_iou_targets, num_boxes, alpha=self.focal_alpha, gamma=2) * src_logits.shape[1]
+
         else:
             target_classes = torch.full(src_logits.shape[:2], self.num_classes,
                                         dtype=torch.int64, device=src_logits.device)
             target_classes[idx] = target_classes_o
-
-            target_classes_onehot = torch.zeros([src_logits.shape[0], src_logits.shape[1], src_logits.shape[2]+1],
-                                                dtype=src_logits.dtype, layout=src_logits.layout, device=src_logits.device)
+            target_classes_onehot = torch.zeros(
+                [src_logits.shape[0], src_logits.shape[1], src_logits.shape[2] + 1],
+                dtype=src_logits.dtype, layout=src_logits.layout, device=src_logits.device)
             target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)
+            target_classes_onehot = target_classes_onehot[:, :, :-1]
+            loss_ce = sigmoid_focal_loss(
+                src_logits, target_classes_onehot, num_boxes, alpha=self.focal_alpha, gamma=2) * src_logits.shape[1]
 
-            target_classes_onehot = target_classes_onehot[:,:,:-1]
-            loss_ce = sigmoid_focal_loss(src_logits, target_classes_onehot, num_boxes, alpha=self.focal_alpha, gamma=2) * src_logits.shape[1]
         losses = {'loss_ce': loss_ce}
-
         if log:
-            # TODO this should probably be a separate loss, not hacked in this one here
             losses['class_error'] = 100 - accuracy(src_logits[idx], target_classes_o)[0]
         return losses
 
+    # ------------------------------------------------------------------
+    # Box losses
+    # ------------------------------------------------------------------
+
     @torch.no_grad()
     def loss_cardinality(self, outputs, targets, indices, num_boxes):
-        """ Compute the cardinality error, ie the absolute error in the number of predicted non-empty boxes
-        This is not really a loss, it is intended for logging purposes only. It doesn't propagate gradients
-        """
         pred_logits = outputs['pred_logits']
-        device = pred_logits.device
+        device      = pred_logits.device
         tgt_lengths = torch.as_tensor([len(v["labels"]) for v in targets], device=device)
-        # Count the number of predictions that are NOT "no-object" (which is the last class)
-        card_pred = (pred_logits.argmax(-1) != pred_logits.shape[-1] - 1).sum(1)
-        card_err = F.l1_loss(card_pred.float(), tgt_lengths.float())
-        losses = {'cardinality_error': card_err}
-        return losses
+        card_pred   = (pred_logits.argmax(-1) != pred_logits.shape[-1] - 1).sum(1)
+        return {'cardinality_error': F.l1_loss(card_pred.float(), tgt_lengths.float())}
 
     def loss_boxes(self, outputs, targets, indices, num_boxes):
-        """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
-           targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
-           The target boxes are expected in format (center_x, center_y, w, h), normalized by the image size.
-        """
         assert 'pred_boxes' in outputs
-        idx = self._get_src_permutation_idx(indices)
-        src_boxes = outputs['pred_boxes'][idx]
+        idx          = self._get_src_permutation_idx(indices)
+        src_boxes    = outputs['pred_boxes'][idx]
         target_boxes = torch.cat([t['boxes'][i] for t, (_, i) in zip(targets, indices)], dim=0)
 
         loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none')
-
-        losses = {}
-        losses['loss_bbox'] = loss_bbox.sum() / num_boxes
-
         loss_giou = 1 - torch.diag(box_ops.generalized_box_iou(
             box_ops.box_cxcywh_to_xyxy(src_boxes),
             box_ops.box_cxcywh_to_xyxy(target_boxes)))
-        losses['loss_giou'] = loss_giou.sum() / num_boxes
-        return losses
-
-    def loss_masks(self, outputs, targets, indices, num_boxes):
-        """Compute BCE-with-logits and Dice losses for segmentation masks on matched pairs.
-        Expects outputs to contain 'pred_masks' of shape [B, Q, H, W] and targets with key 'masks'.
-        """
-        assert 'pred_masks' in outputs, "pred_masks missing in model outputs"
-        idx = self._get_src_permutation_idx(indices)
-        pred_masks = outputs['pred_masks']  # [B, Q, H, W]
-
-        if isinstance(pred_masks, torch.Tensor):
-            # gather matched prediction masks
-            # handle no matches
-            src_masks = pred_masks[idx]  # [N, H, W]
-        else:
-            spatial_features = outputs["pred_masks"]["spatial_features"]
-            query_features = outputs["pred_masks"]["query_features"]
-            bias = outputs["pred_masks"]["bias"]
-            # If there are no matches, return an empty tensor like the Tensor branch does.
-            if idx[0].numel() == 0:
-                device = spatial_features.device
-                src_masks = torch.tensor([], device=device)
-            else:
-                batched_selected_masks = []
-                per_batch_counts = idx[0].unique(return_counts=True)[1]
-                batch_indices = torch.cat((torch.zeros_like(per_batch_counts[:1]), per_batch_counts), dim=0).cumsum(0)
-
-                for i in range(per_batch_counts.shape[0]):
-                    batch_indicator = idx[0][batch_indices[i]:batch_indices[i+1]]
-                    box_indicator = idx[1][batch_indices[i]:batch_indices[i+1]]
-
-                    this_batch_queries = query_features[(batch_indicator, box_indicator)]
-                    this_batch_spatial_features = spatial_features[idx[0][batch_indices[i+1]-1]]
-
-                    this_batch_masks = torch.einsum("chw,nc->nhw", this_batch_spatial_features, this_batch_queries) + bias
-
-                    batched_selected_masks.append(this_batch_masks)
-
-                src_masks = torch.cat(batched_selected_masks)
-
-        if src_masks.numel() == 0:
-            return {
-                'loss_mask_ce': src_masks.sum(),
-                'loss_mask_dice': src_masks.sum(),
-            }
-        # gather matched target masks
-        target_masks = torch.cat([t['masks'][j] for t, (_, j) in zip(targets, indices)], dim=0)  # [N, Ht, Wt]
-
-        # No need to upsample predictions as we are using normalized coordinates :)
-        # N x 1 x H x W
-        src_masks = src_masks.unsqueeze(1)
-        target_masks = target_masks.unsqueeze(1).float()
-
-        num_points = max(src_masks.shape[-2], src_masks.shape[-2] * src_masks.shape[-1] // self.mask_point_sample_ratio)
-
-        with torch.no_grad():
-            # sample point_coords
-            point_coords = get_uncertain_point_coords_with_randomness(
-                src_masks,
-                lambda logits: calculate_uncertainty(logits),
-                num_points,
-                3,
-                0.75,
-            )
-
-        point_logits = point_sample(
-            src_masks,
-            point_coords,
-            align_corners=False,
-        ).squeeze(1)
-
-
-
-        with torch.no_grad():
-            # get gt labels
-            point_labels = point_sample(
-                target_masks,
-                point_coords,
-                align_corners=False,
-                mode="nearest",
-            ).squeeze(1)
-
-        losses = {
-            "loss_mask_ce": sigmoid_ce_loss_jit(point_logits, point_labels, num_boxes),
-            "loss_mask_dice": dice_loss_jit(point_logits, point_labels, num_boxes),
+        return {
+            'loss_bbox': loss_bbox.sum() / num_boxes,
+            'loss_giou': loss_giou.sum() / num_boxes,
         }
 
-        del src_masks
-        del target_masks
+    # ------------------------------------------------------------------
+    # Mask loss
+    # ------------------------------------------------------------------
+
+    def loss_masks(self, outputs, targets, indices, num_boxes):
+        assert 'pred_masks' in outputs
+        idx        = self._get_src_permutation_idx(indices)
+        pred_masks = outputs['pred_masks']
+
+        if isinstance(pred_masks, torch.Tensor):
+            src_masks = pred_masks[idx]
+        else:
+            spatial_features = outputs["pred_masks"]["spatial_features"]
+            query_features   = outputs["pred_masks"]["query_features"]
+            bias             = outputs["pred_masks"]["bias"]
+            if idx[0].numel() == 0:
+                src_masks = torch.tensor([], device=spatial_features.device)
+            else:
+                batched = []
+                pbc = idx[0].unique(return_counts=True)[1]
+                bi  = torch.cat((torch.zeros_like(pbc[:1]), pbc), 0).cumsum(0)
+                for i in range(pbc.shape[0]):
+                    bi_i = idx[0][bi[i]:bi[i+1]]
+                    bx_i = idx[1][bi[i]:bi[i+1]]
+                    q_i  = query_features[(bi_i, bx_i)]
+                    sf_i = spatial_features[idx[0][bi[i+1]-1]]
+                    batched.append(torch.einsum("chw,nc->nhw", sf_i, q_i) + bias)
+                src_masks = torch.cat(batched)
+
+        if src_masks.numel() == 0:
+            return {'loss_mask_ce': src_masks.sum(), 'loss_mask_dice': src_masks.sum()}
+
+        target_masks = torch.cat([t['masks'][j] for t, (_, j) in zip(targets, indices)], dim=0)
+        src_masks    = src_masks.unsqueeze(1)
+        target_masks = target_masks.unsqueeze(1).float()
+
+        num_points = max(
+            src_masks.shape[-2],
+            src_masks.shape[-2] * src_masks.shape[-1] // self.mask_point_sample_ratio,
+        )
+        with torch.no_grad():
+            point_coords = get_uncertain_point_coords_with_randomness(
+                src_masks, lambda logits: calculate_uncertainty(logits), num_points, 3, 0.75)
+
+        point_logits = point_sample(src_masks, point_coords, align_corners=False).squeeze(1)
+        with torch.no_grad():
+            point_labels = point_sample(
+                target_masks, point_coords, align_corners=False, mode="nearest").squeeze(1)
+
+        losses = {
+            "loss_mask_ce":   sigmoid_ce_loss_jit(point_logits, point_labels, num_boxes),
+            "loss_mask_dice": dice_loss_jit(point_logits, point_labels, num_boxes),
+        }
+        del src_masks, target_masks
         return losses
 
+    # ------------------------------------------------------------------
+    # Prototype Alignment Loss  ← thay thế InfoNCE
+    # ------------------------------------------------------------------
+
+    def loss_prototype_align(self, outputs, targets, indices, num_boxes):
+        if 'pred_queries' not in outputs or self.prototype_memory is None:
+            return {}
+
+        query_feats = outputs['pred_queries']   # (B, N, D) — trên GPU
+        device = query_feats.device
+
+        all_feats:  list[torch.Tensor] = []
+        all_labels: list[torch.Tensor] = []
+
+        for b_idx, (src_idx, tgt_idx) in enumerate(indices):
+            if len(src_idx) == 0:
+                continue
+            # FIX: move indices lên cùng device với query_feats
+            src_idx = src_idx.to(device)
+            tgt_idx = tgt_idx.to(device)
+
+            lbls  = targets[b_idx]['labels'][tgt_idx]
+            valid = lbls < self.num_classes
+            if not valid.any():
+                continue
+            all_feats.append(query_feats[b_idx, src_idx[valid]])
+            all_labels.append(lbls[valid])
+
+        if len(all_feats) == 0:
+            return {'loss_proto_align': query_feats.sum() * 0.0}
+
+        feats  = torch.cat(all_feats,  dim=0)
+        labels = torch.cat(all_labels, dim=0)
+
+        self.prototype_memory.update(feats, labels)
+        loss = self.prototype_memory.loss(feats, labels)
+        return {'loss_proto_align': loss}
+
+    # ------------------------------------------------------------------
+    # Loss dispatch
+    # ------------------------------------------------------------------
 
     def _get_src_permutation_idx(self, indices):
-        # permute predictions following indices
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
-        src_idx = torch.cat([src for (src, _) in indices])
+        src_idx   = torch.cat([src for (src, _) in indices])
         return batch_idx, src_idx
 
     def _get_tgt_permutation_idx(self, indices):
-        # permute targets following indices
         batch_idx = torch.cat([torch.full_like(tgt, i) for i, (_, tgt) in enumerate(indices)])
-        tgt_idx = torch.cat([tgt for (_, tgt) in indices])
+        tgt_idx   = torch.cat([tgt for (_, tgt) in indices])
         return batch_idx, tgt_idx
 
     def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
         loss_map = {
-            'labels': self.loss_labels,
-            'cardinality': self.loss_cardinality,
-            'boxes': self.loss_boxes,
-            'masks': self.loss_masks,
+            'labels':          self.loss_labels,
+            'cardinality':     self.loss_cardinality,
+            'boxes':           self.loss_boxes,
+            'masks':           self.loss_masks,
+            'prototype_align': self.loss_prototype_align,
         }
-        assert loss in loss_map, f'do you really want to compute {loss} loss?'
+        assert loss in loss_map, f'Unknown loss: {loss}'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
 
     def forward(self, outputs, targets):
-        """ This performs the loss computation.
-        Parameters:
-             outputs: dict of tensors, see the output specification of the model for the format
-             targets: list of dicts, such that len(targets) == batch_size.
-                      The expected keys in each dict depends on the losses applied, see each loss' doc
-        """
-        group_detr = self.group_detr if self.training else 1
+        group_detr          = self.group_detr if self.training else 1
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
+        indices             = self.matcher(outputs_without_aux, targets, group_detr=group_detr)
 
-        # Retrieve the matching between the outputs of the last layer and the targets
-        indices = self.matcher(outputs_without_aux, targets, group_detr=group_detr)
-
-        # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_boxes = sum(len(t["labels"]) for t in targets)
         if not self.sum_group_losses:
-            num_boxes = num_boxes * group_detr
-        num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
+            num_boxes *= group_detr
+        num_boxes = torch.as_tensor(
+            [num_boxes], dtype=torch.float,
+            device=next(iter(outputs.values())).device)
         if is_dist_avail_and_initialized():
             torch.distributed.all_reduce(num_boxes)
         num_boxes = torch.clamp(num_boxes / get_world_size(), min=1).item()
 
-        # Compute all the requested losses
         losses = {}
         for loss in self.losses:
             losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes))
 
-        # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
-                indices = self.matcher(aux_outputs, targets, group_detr=group_detr)
+                indices_i = self.matcher(aux_outputs, targets, group_detr=group_detr)
                 for loss in self.losses:
-                    kwargs = {}
-                    if loss == 'labels':
-                        # Logging is enabled only for the last layer
-                        kwargs = {'log': False}
-                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_boxes, **kwargs)
-                    l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
-                    losses.update(l_dict)
+                    # prototype_align chỉ apply ở last decoder layer
+                    if loss == 'prototype_align':
+                        continue
+                    kwargs = {'log': False} if loss == 'labels' else {}
+                    l_dict = self.get_loss(loss, aux_outputs, targets, indices_i, num_boxes, **kwargs)
+                    losses.update({k + f'_{i}': v for k, v in l_dict.items()})
 
         if 'enc_outputs' in outputs:
             enc_outputs = outputs['enc_outputs']
-            indices = self.matcher(enc_outputs, targets, group_detr=group_detr)
+            indices_e   = self.matcher(enc_outputs, targets, group_detr=group_detr)
             for loss in self.losses:
-                kwargs = {}
-                if loss == 'labels':
-                    # Logging is enabled only for the last layer
-                    kwargs['log'] = False
-                l_dict = self.get_loss(loss, enc_outputs, targets, indices, num_boxes, **kwargs)
-                l_dict = {k + '_enc': v for k, v in l_dict.items()}
-                losses.update(l_dict)
+                if loss == 'prototype_align':
+                    continue
+                kwargs = {'log': False} if loss == 'labels' else {}
+                l_dict = self.get_loss(loss, enc_outputs, targets, indices_e, num_boxes, **kwargs)
+                losses.update({k + '_enc': v for k, v in l_dict.items()})
 
         return losses
 
 
-def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2):
-    """
-    Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
-    Args:
-        inputs: A float tensor of arbitrary shape.
-                The predictions for each example.
-        targets: A float tensor with the same shape as inputs. Stores the binary
-                 classification label for each element in inputs
-                (0 for the negative class and 1 for the positive class).
-        alpha: (optional) Weighting factor in range (0,1) to balance
-                positive vs negative examples. Default = -1 (no weighting).
-        gamma: Exponent of the modulating factor (1 - p_t) to
-               balance easy vs hard examples.
-    Returns:
-        Loss tensor
-    """
-    prob = inputs.sigmoid()
-    ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
-    p_t = prob * targets + (1 - prob) * (1 - targets)
-    loss = ce_loss * ((1 - p_t) ** gamma)
+# ---------------------------------------------------------------------------
+# Loss functions
+# ---------------------------------------------------------------------------
 
+def sigmoid_focal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2):
+    prob    = inputs.sigmoid()
+    ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+    p_t     = prob * targets + (1 - prob) * (1 - targets)
+    loss    = ce_loss * ((1 - p_t) ** gamma)
     if alpha >= 0:
         alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
-        loss = alpha_t * loss
-
+        loss    = alpha_t * loss
     return loss.mean(1).sum() / num_boxes
 
 
 def sigmoid_varifocal_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2):
-    prob = inputs.sigmoid()
-    focal_weight = targets * (targets > 0.0).float() + \
-            (1 - alpha) * (prob - targets).abs().pow(gamma) * \
-            (targets <= 0.0).float()
+    prob         = inputs.sigmoid()
+    focal_weight = (targets * (targets > 0.0).float()
+                    + (1 - alpha) * (prob - targets).abs().pow(gamma) * (targets <= 0.0).float())
     ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
-    loss = ce_loss * focal_weight
-
-    return loss.mean(1).sum() / num_boxes
+    return (ce_loss * focal_weight).mean(1).sum() / num_boxes
 
 
 def position_supervised_loss(inputs, targets, num_boxes, alpha: float = 0.25, gamma: float = 2):
-    prob = inputs.sigmoid()
+    prob    = inputs.sigmoid()
     ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
-    loss = ce_loss * (torch.abs(targets - prob) ** gamma)
-
+    loss    = ce_loss * (torch.abs(targets - prob) ** gamma)
     if alpha >= 0:
         alpha_t = alpha * (targets > 0.0).float() + (1 - alpha) * (targets <= 0.0).float()
-        loss = alpha_t * loss
-
+        loss    = alpha_t * loss
     return loss.mean(1).sum() / num_boxes
 
 
-def dice_loss(
-        inputs: torch.Tensor,
-        targets: torch.Tensor,
-        num_masks: float,
-    ):
-    """
-    Compute the DICE loss, similar to generalized IOU for masks
-    Args:
-        inputs: A float tensor of arbitrary shape.
-                The predictions for each example.
-        targets: A float tensor with the same shape as inputs. Stores the binary
-                 classification label for each element in inputs
-                (0 for the negative class and 1 for the positive class).
-    """
-    inputs = inputs.sigmoid()
-    inputs = inputs.flatten(1)
-    numerator = 2 * (inputs * targets).sum(-1)
+def dice_loss(inputs: torch.Tensor, targets: torch.Tensor, num_masks: float):
+    inputs      = inputs.sigmoid().flatten(1)
+    numerator   = 2 * (inputs * targets).sum(-1)
     denominator = inputs.sum(-1) + targets.sum(-1)
-    loss = 1 - (numerator + 1) / (denominator + 1)
+    loss        = 1 - (numerator + 1) / (denominator + 1)
     return loss.sum() / num_masks
 
 
-dice_loss_jit = torch.jit.script(
-    dice_loss
-)  # type: torch.jit.ScriptModule
+dice_loss_jit = torch.jit.script(dice_loss)
 
 
-def sigmoid_ce_loss(
-        inputs: torch.Tensor,
-        targets: torch.Tensor,
-        num_masks: float,
-    ):
-    """
-    Args:
-        inputs: A float tensor of arbitrary shape.
-                The predictions for each example.
-        targets: A float tensor with the same shape as inputs. Stores the binary
-                 classification label for each element in inputs
-                (0 for the negative class and 1 for the positive class).
-    Returns:
-        Loss tensor
-    """
+def sigmoid_ce_loss(inputs: torch.Tensor, targets: torch.Tensor, num_masks: float):
     loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
-
     return loss.mean(1).sum() / num_masks
 
 
-sigmoid_ce_loss_jit = torch.jit.script(
-    sigmoid_ce_loss
-)  # type: torch.jit.ScriptModule
+sigmoid_ce_loss_jit = torch.jit.script(sigmoid_ce_loss)
 
+
+# ---------------------------------------------------------------------------
+# PostProcess
+# ---------------------------------------------------------------------------
 
 class PostProcess(nn.Module):
-    """ This module converts the model's output into the format expected by the coco api"""
     def __init__(self, num_select=300) -> None:
         super().__init__()
         self.num_select = num_select
 
     @torch.no_grad()
     def forward(self, outputs, target_sizes):
-        """ Perform the computation
-        Parameters:
-            outputs: raw outputs of the model
-            target_sizes: tensor of dimension [batch_size x 2] containing the size of each images of the batch
-                          For evaluation, this must be the original image size (before any data augmentation)
-                          For visualization, this should be the image size after data augment, but before padding
-        """
         out_logits, out_bbox = outputs['pred_logits'], outputs['pred_boxes']
         out_masks = outputs.get('pred_masks', None)
 
@@ -750,43 +982,47 @@ class PostProcess(nn.Module):
         assert target_sizes.shape[1] == 2
 
         prob = out_logits.sigmoid()
-        topk_values, topk_indexes = torch.topk(prob.view(out_logits.shape[0], -1), self.num_select, dim=1)
-        scores = topk_values
+        topk_values, topk_indexes = torch.topk(
+            prob.view(out_logits.shape[0], -1), self.num_select, dim=1)
+        scores     = topk_values
         topk_boxes = topk_indexes // out_logits.shape[2]
-        labels = topk_indexes % out_logits.shape[2]
-        boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
-        boxes = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1,1,4))
+        labels     = topk_indexes % out_logits.shape[2]
+        boxes      = box_ops.box_cxcywh_to_xyxy(out_bbox)
+        boxes      = torch.gather(boxes, 1, topk_boxes.unsqueeze(-1).repeat(1, 1, 4))
 
-        # and from relative [0, 1] to absolute [0, height] coordinates
         img_h, img_w = target_sizes.unbind(1)
-        scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
-        boxes = boxes * scale_fct[:, None, :]
+        scale_fct    = torch.stack([img_w, img_h, img_w, img_h], dim=1)
+        boxes        = boxes * scale_fct[:, None, :]
 
-        # Optionally gather masks corresponding to the same top-K queries and resize to original size
         results = []
         if out_masks is not None:
             for i in range(out_masks.shape[0]):
-                res_i = {'scores': scores[i], 'labels': labels[i], 'boxes': boxes[i]}
-                k_idx = topk_boxes[i]
-                masks_i = torch.gather(out_masks[i], 0, k_idx.unsqueeze(-1).unsqueeze(-1).repeat(1, out_masks.shape[-2], out_masks.shape[-1]))  # [K, Hm, Wm]
-                h, w = target_sizes[i].tolist()
-                masks_i = F.interpolate(masks_i.unsqueeze(1), size=(int(h), int(w)), mode='bilinear', align_corners=False)  # [K,1,H,W]
-                res_i['masks'] = masks_i > 0.0
-                results.append(res_i)
+                k_idx   = topk_boxes[i]
+                masks_i = torch.gather(
+                    out_masks[i], 0,
+                    k_idx.unsqueeze(-1).unsqueeze(-1).repeat(1, out_masks.shape[-2], out_masks.shape[-1]))
+                h, w    = target_sizes[i].tolist()
+                masks_i = F.interpolate(masks_i.unsqueeze(1), size=(int(h), int(w)),
+                                        mode='bilinear', align_corners=False)
+                results.append({'scores': scores[i], 'labels': labels[i],
+                                'boxes': boxes[i], 'masks': masks_i > 0.0})
         else:
-            results = [{'scores': s, 'labels': l, 'boxes': b} for s, l, b in zip(scores, labels, boxes)]
-
+            results = [{'scores': s, 'labels': l, 'boxes': b}
+                       for s, l, b in zip(scores, labels, boxes)]
         return results
 
 
-class MLP(nn.Module):
-    """ Very simple multi-layer perceptron (also called FFN)"""
+# ---------------------------------------------------------------------------
+# MLP
+# ---------------------------------------------------------------------------
 
+class MLP(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
         super().__init__()
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+        self.layers = nn.ModuleList(
+            nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
 
     def forward(self, x):
         for i, layer in enumerate(self.layers):
@@ -794,112 +1030,152 @@ class MLP(nn.Module):
         return x
 
 
-def build_model(args):
-    # the `num_classes` naming here is somewhat misleading.
-    # it indeed corresponds to `max_obj_id + 1`, where max_obj_id
-    # is the maximum id for a class in your dataset. For example,
-    # COCO has a max_obj_id of 90, so we pass `num_classes` to be 91.
-    # As another example, for a dataset that has a single class with id 1,
-    # you should pass `num_classes` to be 2 (max_obj_id + 1).
-    # For more details on this, check the following discussion
-    # https://github.com/facebookresearch/detr/issues/108#issuecomment-650269223
-    num_classes = args.num_classes + 1
-    torch.device(args.device)
+# ---------------------------------------------------------------------------
+# build_model / build_criterion_and_postprocessors
+# ---------------------------------------------------------------------------
 
+def build_model(cfg):
+    num_classes = cfg.num_classes + 1
+    torch.device(cfg.device)
 
     backbone = build_backbone(
-        encoder=args.encoder,
-        vit_encoder_num_layers=args.vit_encoder_num_layers,
-        pretrained_encoder=args.pretrained_encoder,
-        window_block_indexes=args.window_block_indexes,
-        drop_path=args.drop_path,
-        out_channels=args.hidden_dim,
-        out_feature_indexes=args.out_feature_indexes,
-        projector_scale=args.projector_scale,
-        use_cls_token=args.use_cls_token,
-        hidden_dim=args.hidden_dim,
-        position_embedding=args.position_embedding,
-        freeze_encoder=args.freeze_encoder,
-        layer_norm=args.layer_norm,
-        target_shape=args.shape if hasattr(args, 'shape') else (args.resolution, args.resolution) if hasattr(args, 'resolution') else (640, 640),
-        rms_norm=args.rms_norm,
-        backbone_lora=args.backbone_lora,
-        force_no_pretrain=args.force_no_pretrain,
-        gradient_checkpointing=args.gradient_checkpointing,
-        # Always keep DINOv3 backbone weights loading enabled.
-        # `args.pretrain_weights` refers to RF-DETR checkpoint loading done later.
+        encoder=cfg.encoder,
+        vit_encoder_num_layers=cfg.vit_encoder_num_layers,
+        pretrained_encoder=cfg.pretrained_encoder,
+        window_block_indexes=cfg.window_block_indexes,
+        drop_path=cfg.drop_path,
+        out_channels=cfg.hidden_dim,
+        out_feature_indexes=cfg.out_feature_indexes,
+        projector_scale=cfg.projector_scale,
+        use_cls_token=cfg.use_cls_token,
+        hidden_dim=cfg.hidden_dim,
+        position_embedding=cfg.position_embedding,
+        freeze_encoder=cfg.freeze_encoder,
+        layer_norm=cfg.layer_norm,
+        target_shape=(cfg.shape if hasattr(cfg, "shape")
+                      else (cfg.resolution, cfg.resolution) if hasattr(cfg, "resolution")
+                      else (640, 640)),
+        rms_norm=cfg.rms_norm,
+        backbone_lora=cfg.backbone_lora,
+        force_no_pretrain=cfg.force_no_pretrain,
+        gradient_checkpointing=cfg.gradient_checkpointing,
         load_dinov3_weights=True,
-        patch_size=args.patch_size,
-        num_windows=args.num_windows,
-        positional_encoding_size=args.positional_encoding_size,
-        use_windowed_attn=getattr(args, "use_windowed_attn", False),
-        use_rsa=getattr(args, "use_rsa", False),
-        sra_shared=getattr(args, "sra_shared", True),
-        sra_G=getattr(args, "sra_G", 32),
-        sra_heads=getattr(args, "sra_heads", 8),
+        patch_size=cfg.patch_size,
+        num_windows=cfg.num_windows,
+        positional_encoding_size=cfg.positional_encoding_size,
+        use_windowed_attn=getattr(cfg, "use_windowed_attn", False),
+        use_convnext_projector=getattr(cfg, "use_convnext_projector", True),
     )
-    if args.encoder_only:
+    if cfg.encoder_only:
         return backbone[0].encoder, None, None
-    if args.backbone_only:
+    if cfg.backbone_only:
         return backbone, None, None
 
-    args.num_feature_levels = len(args.projector_scale)
-    transformer = build_transformer(args)
+    cfg.num_feature_levels = len(cfg.projector_scale)
+    transformer = build_transformer(cfg)
 
-    segmentation_head = SegmentationHead(args.hidden_dim, args.dec_layers, downsample_ratio=args.mask_downsample_ratio) if args.segmentation_head else None
+    segmentation_head = (
+        SegmentationHead(cfg.hidden_dim, cfg.dec_layers,
+                         downsample_ratio=cfg.mask_downsample_ratio)
+        if cfg.segmentation_head else None
+    )
 
     model = LWDETR(
-        backbone,
-        transformer,
-        segmentation_head,
+        backbone, transformer, segmentation_head,
         num_classes=num_classes,
-        num_queries=args.num_queries,
-        aux_loss=args.aux_loss,
-        group_detr=args.group_detr,
-        two_stage=args.two_stage,
-        lite_refpoint_refine=args.lite_refpoint_refine,
-        bbox_reparam=args.bbox_reparam,
+        num_queries=cfg.num_queries,
+        aux_loss=cfg.aux_loss,
+        group_detr=cfg.group_detr,
+        two_stage=cfg.two_stage,
+        lite_refpoint_refine=cfg.lite_refpoint_refine,
+        bbox_reparam=cfg.bbox_reparam,
     )
     return model
 
-def build_criterion_and_postprocessors(args):
-    device = torch.device(args.device)
-    matcher = build_matcher(args)
-    weight_dict = {'loss_ce': args.cls_loss_coef, 'loss_bbox': args.bbox_loss_coef}
-    weight_dict['loss_giou'] = args.giou_loss_coef
-    if args.segmentation_head:
-        weight_dict['loss_mask_ce'] = args.mask_ce_loss_coef
-        weight_dict['loss_mask_dice'] = args.mask_dice_loss_coef
-    # TODO this is a hack
-    if args.aux_loss:
+
+def build_criterion_and_postprocessors(cfg):
+    device  = torch.device(cfg.device)
+    matcher = build_matcher(cfg)
+ 
+    weight_dict = {
+        'loss_ce':   cfg.cls_loss_coef,
+        'loss_bbox': cfg.bbox_loss_coef,
+        'loss_giou': cfg.giou_loss_coef,
+    }
+    if cfg.segmentation_head:
+        weight_dict['loss_mask_ce']   = cfg.mask_ce_loss_coef
+        weight_dict['loss_mask_dice'] = cfg.mask_dice_loss_coef
+ 
+    # ------------------------------------------------------------------
+    # Prototype alignment loss — Enhanced PrototypeMemory
+    # ------------------------------------------------------------------
+    prototype_memory = None
+    use_proto = getattr(cfg, 'use_prototype_align', True)
+ 
+    if use_proto:
+        proto_coef = getattr(cfg, 'prototype_loss_coef', 0.1)
+        weight_dict['loss_proto_align'] = proto_coef
+ 
+        prototype_memory = PrototypeMemory(
+            num_classes        = cfg.num_classes,
+            feat_dim           = cfg.hidden_dim,
+            momentum           = getattr(cfg, 'prototype_momentum',           0.999),
+            warmup_steps       = getattr(cfg, 'prototype_warmup_steps',       200),
+            temperature        = getattr(cfg, 'prototype_temperature',        0.1),
+            # [ENH-3] Inter-class repulsion
+            repulsion_coef     = getattr(cfg, 'prototype_repulsion_coef',     0.1),
+            # [ENH-2] Class-frequency weighting
+            use_freq_weight    = getattr(cfg, 'prototype_use_freq_weight',    True),
+            # [ENH-4] Prototype quality weighting
+            use_quality_weight = getattr(cfg, 'prototype_use_quality_weight', True),
+            # [ENH-3] Toggle repulsion
+            use_repulsion      = getattr(cfg, 'prototype_use_repulsion',      True),
+        )
+        prototype_memory.to(device)
+ 
+    # ------------------------------------------------------------------
+    # Aux loss weight dict
+    # ------------------------------------------------------------------
+    if cfg.aux_loss:
         aux_weight_dict = {}
-        for i in range(args.dec_layers - 1):
-            aux_weight_dict.update({k + f'_{i}': v for k, v in weight_dict.items()})
-        if args.two_stage:
-            aux_weight_dict.update({k + '_enc': v for k, v in weight_dict.items()})
+        for i in range(cfg.dec_layers - 1):
+            aux_weight_dict.update({
+                k + f'_{i}': v for k, v in weight_dict.items()
+                if k != 'loss_proto_align'
+            })
+        if cfg.two_stage:
+            aux_weight_dict.update({
+                k + '_enc': v for k, v in weight_dict.items()
+                if k != 'loss_proto_align'
+            })
         weight_dict.update(aux_weight_dict)
-
+ 
     losses = ['labels', 'boxes', 'cardinality']
-    if args.segmentation_head:
+    if cfg.segmentation_head:
         losses.append('masks')
-
-    sum_group_losses = getattr(args, 'sum_group_losses', False)
-    if args.segmentation_head:
-        criterion = SetCriterion(args.num_classes + 1, matcher=matcher, weight_dict=weight_dict,
-                                focal_alpha=args.focal_alpha, losses=losses,
-                                group_detr=args.group_detr, sum_group_losses=sum_group_losses,
-                                use_varifocal_loss = args.use_varifocal_loss,
-                                use_position_supervised_loss=args.use_position_supervised_loss,
-                                ia_bce_loss=args.ia_bce_loss,
-                                mask_point_sample_ratio=args.mask_point_sample_ratio)
-    else:
-        criterion = SetCriterion(args.num_classes + 1, matcher=matcher, weight_dict=weight_dict,
-                                focal_alpha=args.focal_alpha, losses=losses,
-                                group_detr=args.group_detr, sum_group_losses=sum_group_losses,
-                                use_varifocal_loss = args.use_varifocal_loss,
-                                use_position_supervised_loss=args.use_position_supervised_loss,
-                                ia_bce_loss=args.ia_bce_loss)
+    if use_proto:
+        losses.append('prototype_align')
+ 
+    criterion_kwargs = dict(
+        focal_alpha=cfg.focal_alpha,
+        losses=losses,
+        group_detr=cfg.group_detr,
+        sum_group_losses=getattr(cfg, 'sum_group_losses', False),
+        use_varifocal_loss=cfg.use_varifocal_loss,
+        use_position_supervised_loss=cfg.use_position_supervised_loss,
+        ia_bce_loss=cfg.ia_bce_loss,
+        prototype_memory=prototype_memory,
+        prototype_loss_coef=getattr(cfg, 'prototype_loss_coef', 0.1),
+    )
+    if cfg.segmentation_head:
+        criterion_kwargs['mask_point_sample_ratio'] = cfg.mask_point_sample_ratio
+ 
+    criterion = SetCriterion(
+        cfg.num_classes + 1,
+        matcher=matcher,
+        weight_dict=weight_dict,
+        **criterion_kwargs,
+    )
     criterion.to(device)
-    postprocess = PostProcess(num_select=args.num_select)
-
+    postprocess = PostProcess(num_select=cfg.num_select)
     return criterion, postprocess

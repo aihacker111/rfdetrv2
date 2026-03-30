@@ -13,28 +13,17 @@ import supervision as sv
 project_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(project_root))
 
-from rfdetrv2 import RFDETRBase, RFDETRSmall
-from rfdetrv2.util.coco_classes import COCO_CLASSES
-from rfdetrv2.util.dinov3_pretrained import resolve_pretrained_encoder_path
+from rfdetrv2.detr._util import pydantic_dump
+from rfdetrv2.runner import Pipeline
+from rfdetrv2.schemas import RFDETRBaseConfig, RFDETRSmallConfig
+from rfdetrv2.utils.coco_classes import COCO_CLASSES
+from rfdetrv2.utils.detection_io import resolve_class_label
+from rfdetrv2.utils.dinov3_pretrained import resolve_pretrained_encoder_path
 
 DINO_WEIGHTS_BY_SIZE = {
     "small": "dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth",
     "base": "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
 }
-
-
-def _get_class_name(cls_id: int, class_names: dict, use_coco_fallback: bool = True) -> str:
-    raw = int(cls_id)
-    for key in (raw, raw + 1):
-        val = class_names.get(key)
-        if isinstance(val, str):
-            return val
-    if use_coco_fallback:
-        if raw in COCO_CLASSES:
-            return COCO_CLASSES[raw]
-        if (raw + 1) in COCO_CLASSES:
-            return COCO_CLASSES[raw + 1]
-    return str(raw)
 
 
 def main() -> None:
@@ -49,16 +38,20 @@ def main() -> None:
     parser.add_argument("--skip-frames", type=int, default=0, help="Process every Nth frame (0 = all)")
     args = parser.parse_args()
 
-    # Load model
-    ModelClass = RFDETRSmall if args.model_size == "small" else RFDETRBase
+    cfg_cls = RFDETRSmallConfig if args.model_size == "small" else RFDETRBaseConfig
     pretrained = resolve_pretrained_encoder_path(
         project_root,
         args.model_size,
         explicit=None,
         weights_by_size=DINO_WEIGHTS_BY_SIZE,
     )
-    model = ModelClass(pretrain_weights=args.weights, pretrained_encoder=pretrained, device=args.device)
-    class_names = model.class_names or COCO_CLASSES
+    model_cfg = cfg_cls(
+        pretrain_weights=args.weights,
+        pretrained_encoder=pretrained,
+        device=args.device,
+    )
+    pipe = Pipeline(**pydantic_dump(model_cfg))
+    class_names = getattr(pipe, "class_names", None) or COCO_CLASSES
 
     cap = cv2.VideoCapture(args.video)
     if not cap.isOpened():
@@ -92,10 +85,10 @@ def main() -> None:
                 continue
 
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            detections = model.predict(frame_rgb, threshold=args.threshold)
+            detections = pipe.predict(frame_rgb, threshold=args.threshold)
 
             labels = [
-                f"{_get_class_name(int(cid), class_names)} {float(conf):.2f}"
+                f"{resolve_class_label(int(cid), class_names)} {float(conf):.2f}"
                 for conf, cid in zip(detections.confidence, detections.class_id)
             ]
 
