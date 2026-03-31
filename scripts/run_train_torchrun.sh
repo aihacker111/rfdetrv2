@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
-# Multi-GPU fine-tuning via torchrun.
+# Multi-GPU training via torchrun (sets distributed env for Pipeline).
 #
-# Env: NUM_GPUS, MASTER_PORT, CUDA_VISIBLE_DEVICES, DATASET_DIR, OUTPUT_DIR (optional)
+# Env:
+#   NUM_GPUS       default 2
+#   MASTER_PORT    default 29500
+#   CUDA_VISIBLE_DEVICES  e.g. 0,1
+#   DATASET_DIR, OUTPUT_DIR  optional defaults passed as CLI flags
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 NUM_GPUS="${NUM_GPUS:-2}"
-MASTER_PORT="${MASTER_PORT:-29501}"
+MASTER_PORT="${MASTER_PORT:-29500}"
 
 if command -v nvidia-smi >/dev/null 2>&1; then
   N="$(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | wc -l | tr -d ' ')"
@@ -28,4 +32,4 @@ OD=()
 [[ -n "${OUTPUT_DIR:-}" ]] && OD+=(--output-dir "${OUTPUT_DIR}")
 
 exec torchrun --standalone --nproc_per_node="${NUM_GPUS}" --master_port="${MASTER_PORT}" \
-  "${ROOT}/scripts/finetune.py" "${DS[@]}" "${OD[@]}" "$@"
+  "${ROOT}/scripts/train.py" "${DS[@]}" "${OD[@]}" "$@"

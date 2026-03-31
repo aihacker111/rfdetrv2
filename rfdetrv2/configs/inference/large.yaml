@@ -1,12 +1,17 @@
-# RF-DETRv2 — packaged default (RFDETRBaseConfig architecture).
-# Per-variant YAMLs: train_from_scratch/, finetune/, inference/ (nano|small|base|large).
-# Regenerate variants: python rfdetrv2/configs/_generate_variant_yamls.py
+# Inference — large (RFDETRLargeConfig)
+# For Pipeline(cfg=load_config(...)).predict(...); set train.num_classes to match checkpoint.
+# Optional: pipe.predict(..., save_path="out/vis.png").
+# ViT-L: ensure DINOv3 backbone weights are available (pretrained_encoder or local .pth).
 
 model:
   vit_encoder_num_layers: 12
   window_block_indexes: null
   position_embedding: sine
-  out_feature_indexes: [2, 5, 8, 11]
+  out_feature_indexes:
+  - 2
+  - 5
+  - 8
+  - 11
   freeze_encoder: false
   freeze_decoder: false
   freeze_detection_head: false
@@ -22,18 +27,17 @@ model:
   num_queries: 300
   group_detr: 13
   two_stage: true
-  projector_scale: [P3, P4, P5]
+  projector_scale:
+  - P3
+  - P4
+  - P5
   lite_refpoint_refine: true
   num_select: 300
   dec_n_points: 8
   decoder_norm: LN
   bbox_reparam: true
   freeze_batch_norm: false
-  encoder: dinov3_base
-  resolution: 560
   patch_size: 16
-  num_windows: 4
-  positional_encoding_size: 35
   use_windowed_attn: false
   use_convnext_projector: true
   gradient_checkpointing: false
@@ -44,18 +48,20 @@ model:
   mask_dice_loss_coef: 5.0
   eval_max_dets: 500
   use_rope: true
-
+  encoder: dinov3_large
+  resolution: 640
+  num_windows: 4
+  positional_encoding_size: 35
 train:
   num_classes: 90
-  auto_infer_coco_classes: true
   grad_accum_steps: 1
   amp: false
-  lr: 2.0e-4
-  lr_encoder: 2.5e-5
+  lr: 0.0002
+  lr_encoder: 2.5e-05
   lr_scale_mode: sqrt
-  batch_size: 2
-  weight_decay: 1.0e-4
-  epochs: 12
+  batch_size: 1
+  weight_decay: 0.0001
+  epochs: 1
   lr_drop: 11
   clip_max_norm: 0.1
   lr_vit_layer_decay: 0.8
@@ -95,26 +101,27 @@ train:
   coco_path: null
   dataset_dir: null
   square_resize_div_64: false
-  output_dir: output
   dont_save_weights: false
   checkpoint_interval: 10
   seed: 42
-  resume: ""
+  resume: ''
   start_epoch: 0
   eval: false
   use_ema: false
   ema_decay: 0.9997
   ema_tau: 0
-  num_workers: 2
+  num_workers: 0
   warmup_epochs: 1.0
   lr_scheduler: step
-  lr_milestones: [80, 160]
+  lr_milestones:
+  - 80
+  - 160
   lr_gamma: 0.1
   lr_min_factor: 0.05
   lr_stable_ratio: 0.7
   lr_restart_period: 50
   lr_restart_decay: 0.8
-  early_stopping: true
+  early_stopping: false
   early_stopping_patience: 10
   early_stopping_min_delta: 0.001
   early_stopping_use_ema: false
@@ -132,8 +139,8 @@ train:
   use_convnext_projector: true
   tensorboard: false
   wandb: false
-  pretrain_weights: null
-
+  pretrain_weights: rfdetrv2_large
+  output_dir: output/inference_large
 system:
   device: cuda
   world_size: 1

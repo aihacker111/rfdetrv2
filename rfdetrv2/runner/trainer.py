@@ -37,7 +37,11 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 import rfdetrv2.utils.misc as utils
 from rfdetrv2.cfg.loader import load_run_config, merge_namespace, namespace_to_dict
-from rfdetrv2.data import build_dataset, get_coco_api_from_dataset
+from rfdetrv2.data import (
+    build_dataset,
+    get_coco_api_from_dataset,
+    maybe_apply_coco_category_inference_to_cfg,
+)
 from rfdetrv2.models import PostProcess, build_criterion_and_postprocessors, build_model
 from rfdetrv2.runner.inference import IMAGENET_MEAN, IMAGENET_STD, predict_detections
 from rfdetrv2.utils.coco_classes import COCO_CLASSES
@@ -90,6 +94,7 @@ class Pipeline:
         else:
             self.cfg = load_run_config(config, **kwargs)
         cfg = self.cfg
+        maybe_apply_coco_category_inference_to_cfg(cfg)
         self.resolution = cfg.resolution
         self.model = build_model(cfg)
         self.device = torch.device(cfg.device)

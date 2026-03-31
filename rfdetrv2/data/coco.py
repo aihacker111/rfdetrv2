@@ -18,10 +18,12 @@ COCO dataset which returns image_id for evaluation.
 
 Mostly copy-paste from https://github.com/pytorch/vision/blob/13b35ff/references/detection/coco_utils.py
 """
+import contextlib
 import json
 import logging
+import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING, Union
 
 import pycocotools.mask as coco_mask
 import torch
@@ -30,6 +32,9 @@ import torchvision
 from PIL import Image
 
 import rfdetrv2.data.transforms as T
+
+if TYPE_CHECKING:
+    from pycocotools.coco import COCO
 
 logger = logging.getLogger(__name__)
 
@@ -326,33 +331,131 @@ def resolve_coco_train_annotation_path(root: Union[str, Path]) -> Optional[Path]
     return resolve_coco_annotation_path_for_categories(root)
 
 
+def _warn_orphan_annotation_category_ids(coco: "COCO", *, max_unique_orphans: int = 32) -> None:
+    """Log if any ``annotations[].category_id`` is missing from ``categories``."""
+    cat_ids = {int(x) for x in coco.getCatIds()}
+    anns = coco.dataset.get("annotations") or []
+    if not anns:
+        return
+    step = 1
+    max_scan = 250_000
+    if len(anns) > max_scan:
+        step = max(1, len(anns) // max_scan)
+    orphans: set[int] = set()
+    for i in range(0, len(anns), step):
+        cid = int(anns[i]["category_id"])
+        if cid not in cat_ids:
+            orphans.add(cid)
+            if len(orphans) >= max_unique_orphans:
+                break
+    if orphans:
+        logger.warning(
+            "COCO annotations reference category_id values not present in categories "
+            "(often a 0- vs 1-based export bug). Sample ids: %s",
+            sorted(orphans),
+        )
+
+
+def infer_coco_label_mapping_from_ann_file(
+    ann_path: Union[str, Path],
+    *,
+    check_annotation_ids: bool = True,
+) -> Optional[Tuple[List[str], int, List[int]]]:
+    """Build ``(class_names, num_classes, label_to_cat_id)`` using ``pycocotools.COCO``.
+
+    This matches ``torchvision.datasets.CocoDetection`` / our :class:`CocoDetection` mapping:
+    contiguous training labels ``0..K-1`` follow **sorted** ``category_id`` order, regardless of
+    whether ids start at 0, 1, or are non-contiguous (e.g. ``[1,3,5]``).
+    """
+    ann_path = Path(ann_path)
+    if not ann_path.is_file():
+        return None
+    try:
+        from pycocotools.coco import COCO
+    except ImportError:
+        logger.warning("pycocotools not available; cannot load %s via COCO API", ann_path)
+        return None
+    try:
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            with contextlib.redirect_stdout(devnull):
+                coco = COCO(str(ann_path))
+    except Exception as exc:
+        logger.warning("Failed to parse COCO file %s: %s", ann_path, exc)
+        return None
+    cat_ids = sorted(int(x) for x in coco.getCatIds())
+    if not cat_ids:
+        return None
+    cats = coco.loadCats(cat_ids)
+    class_names = [str(c.get("name", "") or f"class_{int(c['id'])}") for c in cats]
+    label_to_cat_id = [int(c["id"]) for c in cats]
+    num_classes = len(cat_ids)
+    if check_annotation_ids:
+        _warn_orphan_annotation_category_ids(coco)
+    lo, hi = min(label_to_cat_id), max(label_to_cat_id)
+    logger.info(
+        "COCO label layout: K=%d classes, raw category_id range [%d, %d] "
+        "(indices 0..K-1 map via label_to_cat_id).",
+        num_classes,
+        lo,
+        hi,
+    )
+    return class_names, num_classes, label_to_cat_id
+
+
 def infer_coco_num_classes_and_names(
     root: Union[str, Path],
 ) -> Optional[Tuple[List[str], int, List[int]]]:
-    """Read categories from the train COCO JSON.
+    """Read categories from a COCO JSON under *root* (same resolver as training).
 
     Returns ``(class_names, num_classes, label_to_cat_id)`` where ``num_classes`` is **K**
     (the number of foreground classes). Training uses contiguous labels ``0..K-1`` via
-    :class:`CocoDetection`; ``label_to_cat_id[i]`` is the COCO ``category_id`` for index ``i``.
+    :class:`CocoDetection`; ``label_to_cat_id[i]`` is the dataset ``category_id`` for index ``i``.
     """
-    ann_path = resolve_coco_annotation_path_for_categories(root)
+    ann_path = resolve_coco_annotation_path_for_categories(Path(root))
     if ann_path is None:
         return None
+    return infer_coco_label_mapping_from_ann_file(ann_path)
+
+
+def maybe_apply_coco_category_inference_to_cfg(cfg: Any) -> None:
+    """If enabled, set ``class_names``, ``label_to_cat_id``, and ``num_classes`` from COCO JSON.
+
+    Call **before** ``build_model`` so the detector head matches the dataloader. Works for
+    ``dataset_file`` in ``(\"coco\", \"roboflow\")`` when ``coco_path`` or ``dataset_dir`` exists.
+
+    Toggle with ``cfg.auto_infer_coco_classes`` (default: treat missing as True).
+    """
+    if getattr(cfg, "dataset_file", None) not in ("coco", "roboflow"):
+        return
+    if getattr(cfg, "auto_infer_coco_classes", True) is False:
+        return
+    root = getattr(cfg, "coco_path", None) or getattr(cfg, "dataset_dir", None)
+    if root is None or str(root).strip() == "":
+        return
+    root_p = Path(str(root)).expanduser()
+    if not root_p.is_dir():
+        return
+    ann_path = resolve_coco_annotation_path_for_categories(root_p)
+    if ann_path is None:
+        return
+    inferred = infer_coco_label_mapping_from_ann_file(ann_path)
+    if inferred is None:
+        return
+    names, k, lid = inferred
+    setattr(cfg, "class_names", names)
+    setattr(cfg, "label_to_cat_id", list(lid))
+    cur = getattr(cfg, "num_classes", None)
     try:
-        with open(ann_path, "r", encoding="utf-8") as f:
-            anns = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-    categories = anns.get("categories") or []
-    if not categories:
-        return None
-    categories = sorted(categories, key=lambda c: int(c["id"]))
-    class_names = [str(c.get("name", "")) for c in categories]
-    label_to_cat_id = [int(c["id"]) for c in categories if "id" in c]
-    if not label_to_cat_id:
-        return None
-    num_classes = len(categories)
-    return class_names, num_classes, label_to_cat_id
+        cur_i = int(cur) if cur is not None else None
+    except (TypeError, ValueError):
+        cur_i = None
+    if cur_i is not None and cur_i != k:
+        logger.warning(
+            "auto_infer_coco_classes: cfg.num_classes=%s != COCO K=%s; overriding to K.",
+            cur_i,
+            k,
+        )
+    setattr(cfg, "num_classes", k)
 
 
 def _resolve_build_coco_ann_and_images(root: Path, split: str) -> Tuple[Path, Path]:

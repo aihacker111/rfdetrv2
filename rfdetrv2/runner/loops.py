@@ -17,6 +17,7 @@
 """
 Per-epoch train step and COCO evaluation (used by ``rfdetrv2.runner.Pipeline``).
 """
+import logging
 import math
 import random
 from typing import Iterable, List, Sequence
@@ -39,6 +40,8 @@ from typing import Callable, DefaultDict, List
 import numpy as np
 
 from rfdetrv2.utils.misc import NestedTensor
+
+logger = logging.getLogger(__name__)
 
 
 def get_autocast_args(cfg):
@@ -412,24 +415,39 @@ def coco_extended_metrics(coco_eval):
         "recall"   : best['macro_recall'],
     }
 
+_EVAL_LABEL_MAP_OOB_LOGGED = False
+
+
 def map_eval_labels_to_coco_category_ids(
     results_all: List[dict],
     label_to_cat_id: Sequence[int],
 ) -> List[dict]:
     """Map model class indices 0..K-1 to COCO ``category_id`` for pycocotools evaluation."""
+    global _EVAL_LABEL_MAP_OOB_LOGGED
     if not label_to_cat_id:
         return results_all
+    n = len(label_to_cat_id)
     out: List[dict] = []
     for res in results_all:
         if "labels" not in res:
             out.append(res)
             continue
         labels = res["labels"]
-        mapped = torch.tensor(
-            [label_to_cat_id[int(x.item())] for x in labels],
-            dtype=labels.dtype,
-            device=labels.device,
-        )
+        mapped_ids: list[int] = []
+        for x in labels:
+            i = int(x.item())
+            if i < 0 or i >= n:
+                if not _EVAL_LABEL_MAP_OOB_LOGGED:
+                    logger.warning(
+                        "Model label index %s out of range for label_to_cat_id (len=%s); "
+                        "clamping. Check num_classes vs dataset K and background class.",
+                        i,
+                        n,
+                    )
+                    _EVAL_LABEL_MAP_OOB_LOGGED = True
+                i = min(max(i, 0), n - 1)
+            mapped_ids.append(int(label_to_cat_id[i]))
+        mapped = torch.tensor(mapped_ids, dtype=labels.dtype, device=labels.device)
         out.append({**res, "labels": mapped})
     return out
 

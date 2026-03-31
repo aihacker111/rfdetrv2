@@ -38,6 +38,8 @@ class TrainConfig(BaseModel):
     prototype_use_quality_weight: bool = True  # [ENH-4] Prototype quality weighting
     prototype_use_repulsion: bool = True   # [ENH-3] Toggle inter-class repulsion
     dataset_file: Literal["coco", "o365", "roboflow"] = "roboflow"
+    # COCO / Roboflow-COCO: infer num_classes, class_names, label_to_cat_id from annotations (any category_id layout).
+    auto_infer_coco_classes: bool = True
     square_resize_div_64: bool = True
     dataset_dir: str  # COCO layout root (train/, val/, annotations/); also default for coco_path when unset
     coco_path: Optional[str] = None  # If None, train_from_config uses dataset_dir for build_coco

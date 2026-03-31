@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ------------------------------------------------------------------------
-# Validation / test COCO metrics: same dataloader + ``loops.evaluate`` as training, with ``eval: true``.
+# Fine-tune: ``Pipeline.finetune`` + YAML under rfdetrv2/configs/finetune/.
 # ------------------------------------------------------------------------
 from __future__ import annotations
 
@@ -19,25 +19,20 @@ from rfdetrv2.runner.trainer import Pipeline  # noqa: E402
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="RF-DETRv2 COCO-style evaluation (internal CocoEvaluator, no score threshold in head).",
+        description="RF-DETRv2 fine-tuning via Pipeline + YAML (pretrain_weights in YAML or CLI).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    _common.add_config_args(parser, mode="evaluate")
+    _common.add_config_args(parser, mode="finetune")
     _common.add_data_and_run_args(parser)
-    parser.add_argument(
-        "--weights",
-        type=str,
-        required=True,
-        help="Checkpoint .pth (loaded like pretrain_weights in Pipeline.__init__).",
-    )
+    _common.add_pretrain_arg(parser)
     args = parser.parse_args()
-    cfg_path = _common.resolve_yaml("evaluate", args.variant, args.config)
+    cfg_path = _common.resolve_yaml("finetune", args.variant, args.config)
     overrides = _common.overrides_from_args(args)
-    overrides["eval"] = True
-    overrides["pretrain_weights"] = args.weights
+    if args.pretrain_weights is not None:
+        overrides["pretrain_weights"] = args.pretrain_weights
 
     pipe = Pipeline(config=str(cfg_path), **overrides)
-    pipe.train(_common.empty_callbacks())
+    pipe.finetune(_common.empty_callbacks())
 
 
 if __name__ == "__main__":

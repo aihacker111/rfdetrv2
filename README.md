@@ -4,36 +4,31 @@ Object detection built on RF-DETR with DINOv3 backbones, supervised training, an
 
 ## Layout
 
-See **[docs/REPO_LAYOUT.md](docs/REPO_LAYOUT.md)** and **[scripts/README.md](scripts/README.md)** for folders, CLIs, and conventions.
+Entry CLIs live under **`scripts/`** and call **`rfdetrv2.runner.Pipeline`** with YAML from **`rfdetrv2/configs/`** (`train_from_scratch/`, `finetune/`, `inference/`).
 
 ## Quick start (supervised training)
 
 From the repository root:
 
 ```bash
-# Multi-GPU (edit env vars in the script as needed)
-./run_train_supervised.sh
-# or
-./scripts/run_train_supervised.sh
+# Single GPU
+./scripts/run_train.sh --dataset-dir /path/to/coco --output-dir ./output --variant base
+python scripts/train.py --help
+
+# Multi-GPU (torchrun)
+./scripts/run_train_torchrun.sh --dataset-dir /path/to/coco --output-dir ./output --variant base
 ```
 
-```bash
-python scripts/train_supervised.py --help
-# equivalent:
-python train_supervised.py --help
-```
+Fine-tune: `./scripts/run_finetune.sh` or `./scripts/run_finetune_single_gpu.sh` → `scripts/finetune.py`.
 
 Weights resolve under `dinov3_pretrained/` or download automatically; DINOv3 hub source is ensured under `dinov3/` when needed.
 
-## Other tools (inference, eval, viz)
-
-All live under **`scripts/`**; the same filenames at the repo root forward to them, e.g.:
+## Other tools (inference, eval)
 
 ```bash
-python scripts/inference.py --help
-python inference.py --help    # same
-python scripts/evaluate.py --weights ... --dataset-dir ...
-python scripts/count_model_params.py
+python scripts/inference.py --weights … --image … --variant base
+python scripts/evaluate.py --weights … --dataset-dir … --variant base
+./scripts/run_evaluate.sh --weights … --dataset-dir …
 ```
 
 ## Tests

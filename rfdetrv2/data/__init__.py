@@ -20,7 +20,12 @@ from typing import Any, Optional
 import torch.utils.data
 import torchvision
 
-from rfdetrv2.data.coco import build_coco, build_roboflow_from_coco
+from rfdetrv2.data.coco import (
+    build_coco,
+    build_roboflow_from_coco,
+    infer_coco_label_mapping_from_ann_file,
+    maybe_apply_coco_category_inference_to_cfg,
+)
 from rfdetrv2.data.o365 import build_o365
 from rfdetrv2.data.yolo import YoloDetection, build_roboflow_from_yolo
 

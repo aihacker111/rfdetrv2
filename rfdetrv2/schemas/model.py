@@ -143,9 +143,10 @@ class RFDETRSmallConfig(ModelConfig):
 
 class RFDETRLargeConfig(ModelConfig):
     """
-    The configuration for an RF-DETR Base model.
+    RF-DETR Large: DINOv3 ViT-L (``dinov3_vitl16`` hub); higher resolution than Base.
     """
-    encoder: Literal["dinov3_nano", "dinov3_small", "dinov3_base", "dinov3_large"] = "dinov3_base"
+
+    encoder: Literal["dinov3_nano", "dinov3_small", "dinov3_base", "dinov3_large"] = "dinov3_large"
     hidden_dim: int = 256
     patch_size: int = 16
     num_windows: int = 4
