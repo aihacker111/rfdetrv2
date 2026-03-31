@@ -122,6 +122,8 @@ train:
   multi_scale: false
   expanded_scales: false
   do_random_resize_via_padding: false
+  document_table2_augment: false
+  document_table2_p: 0.5
   use_cls_token: false
   encoder_only: false
   backbone_only: false

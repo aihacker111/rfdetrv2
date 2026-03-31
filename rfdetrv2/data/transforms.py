@@ -38,6 +38,16 @@ from rfdetrv2.utils.box_ops import box_xyxy_to_cxcywh
 from rfdetrv2.utils.misc import interpolate
 
 
+def _align_hw_to_multiple(hw: Tuple[int, int], d: int) -> Tuple[int, int]:
+    """Round (height, width) to nearest multiples of *d* (ViT patch alignment)."""
+    if d <= 1:
+        return hw
+    h, w = int(hw[0]), int(hw[1])
+    h = max(d, round(h / d) * d)
+    w = max(d, round(w / d) * d)
+    return (h, w)
+
+
 def crop(image: PIL.Image.Image, target: Dict[str, Any], region: Tuple[int, int, int, int]) -> Tuple[PIL.Image.Image, Dict[str, Any]]:
     cropped_image = F.crop(image, *region)
 
@@ -98,7 +108,14 @@ def hflip(image: PIL.Image.Image, target: Dict[str, Any]) -> Tuple[PIL.Image.Ima
     return flipped_image, target
 
 
-def resize(image: PIL.Image.Image, target: Optional[Dict[str, Any]], size: Union[int, Tuple[int, int], List[int]], max_size: Optional[int] = None) -> Tuple[PIL.Image.Image, Optional[Dict[str, Any]]]:
+def resize(
+    image: PIL.Image.Image,
+    target: Optional[Dict[str, Any]],
+    size: Union[int, Tuple[int, int], List[int]],
+    max_size: Optional[int] = None,
+    *,
+    size_divisor: Optional[int] = 16,
+) -> Tuple[PIL.Image.Image, Optional[Dict[str, Any]]]:
     # size can be min_size (scalar) or (w, h) tuple
 
     def get_size_with_aspect_ratio(image_size: Tuple[int, int], size: int, max_size: Optional[int] = None) -> Tuple[int, int]:
@@ -128,6 +145,8 @@ def resize(image: PIL.Image.Image, target: Optional[Dict[str, Any]], size: Union
             return get_size_with_aspect_ratio(image_size, size, max_size)
 
     size = get_size(image.size, size, max_size)
+    if size_divisor is not None and size_divisor > 1:
+        size = _align_hw_to_multiple(size, size_divisor)
     rescaled_image = F.resize(image, size)
 
     if target is None:
@@ -218,24 +237,34 @@ class RandomHorizontalFlip(object):
 
 
 class RandomResize(object):
-    def __init__(self, sizes: List[int], max_size: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        sizes: List[int],
+        max_size: Optional[int] = None,
+        *,
+        size_divisor: Optional[int] = 16,
+    ) -> None:
         assert isinstance(sizes, (list, tuple))
         self.sizes = sizes
         self.max_size = max_size
+        self.size_divisor = size_divisor
 
     def __call__(self, img: PIL.Image.Image, target: Optional[Dict[str, Any]] = None) -> Tuple[PIL.Image.Image, Optional[Dict[str, Any]]]:
         size = random.choice(self.sizes)
-        return resize(img, target, size, self.max_size)
+        return resize(img, target, size, self.max_size, size_divisor=self.size_divisor)
 
 
 class SquareResize(object):
-    def __init__(self, sizes: List[int]) -> None:
+    def __init__(self, sizes: List[int], *, size_divisor: int = 16) -> None:
         assert isinstance(sizes, (list, tuple))
         self.sizes = sizes
+        self.size_divisor = size_divisor
 
     def __call__(self, img: PIL.Image.Image, target: Optional[Dict[str, Any]] = None) -> Tuple[PIL.Image.Image, Optional[Dict[str, Any]]]:
         size = random.choice(self.sizes)
-        rescaled_img=F.resize(img, (size, size))
+        if self.size_divisor > 1:
+            size = max(self.size_divisor, round(size / self.size_divisor) * self.size_divisor)
+        rescaled_img = F.resize(img, (size, size))
         w, h = rescaled_img.size
         if target is None:
             return rescaled_img, None

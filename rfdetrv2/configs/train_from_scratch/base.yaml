@@ -52,42 +52,27 @@ model:
   num_windows: 4
   positional_encoding_size: 35
 train:
-  num_classes: 90
-  auto_infer_coco_classes: true
-  grad_accum_steps: 1
-  amp: false
   lr: 0.0002
   lr_encoder: 2.5e-05
-  lr_scale_mode: sqrt
   batch_size: 2
-  weight_decay: 0.0001
+  grad_accum_steps: 1
   epochs: 12
+  resume: ''
+  ema_decay: 0.9997
+  ema_tau: 0
   lr_drop: 11
-  clip_max_norm: 0.1
+  checkpoint_interval: 10
+  warmup_epochs: 1.0
   lr_vit_layer_decay: 0.8
   lr_component_decay: 1.0
-  do_benchmark: false
-  dropout: 0.0
   drop_path: 0.0
-  drop_mode: standard
-  drop_schedule: constant
-  cutoff_epoch: 0
-  pretrained_encoder: null
-  pretrain_exclude_keys: null
-  pretrain_keys_modify_to_load: null
-  pretrained_distiller: null
-  set_cost_class: 2.0
-  set_cost_bbox: 5.0
-  set_cost_giou: 2.0
+  group_detr: 13
+  ia_bce_loss: true
   cls_loss_coef: 1.0
   bbox_loss_coef: 5.0
   giou_loss_coef: 2.0
-  focal_alpha: 0.25
-  aux_loss: true
-  sum_group_losses: false
   use_varifocal_loss: false
-  use_position_supervised_loss: false
-  ia_bce_loss: true
+  use_convnext_projector: true
   use_prototype_align: true
   prototype_loss_coef: 0.1
   prototype_momentum: 0.999
@@ -98,20 +83,58 @@ train:
   prototype_use_quality_weight: true
   prototype_use_repulsion: true
   dataset_file: coco
+  auto_infer_coco_classes: true
+  square_resize_div_64: false
   coco_path: null
   dataset_dir: null
-  square_resize_div_64: false
+  output_dir: output/train_scratch_base
+  multi_scale: false
+  expanded_scales: false
+  do_random_resize_via_padding: false
+  document_table2_augment: false
+  document_table2_p: 0.5
+  use_ema: false
+  num_workers: 2
+  weight_decay: 0.0001
+  early_stopping: true
+  early_stopping_patience: 10
+  early_stopping_min_delta: 0.001
+  early_stopping_use_ema: false
+  tensorboard: false
+  wandb: false
+  project: null
+  run: null
+  class_names: null
+  run_test: false
+  segmentation_head: false
+  eval_max_dets: 500
+  freeze_encoder: false
+  freeze_decoder: false
+  freeze_detection_head: false
+  num_classes: 90
+  amp: false
+  lr_scale_mode: sqrt
+  clip_max_norm: 0.1
+  do_benchmark: false
+  dropout: 0.0
+  drop_mode: standard
+  drop_schedule: constant
+  cutoff_epoch: 0
+  pretrained_encoder: null
+  pretrain_exclude_keys: null
+  pretrain_keys_modify_to_load: null
+  pretrained_distiller: null
+  set_cost_class: 2.0
+  set_cost_bbox: 5.0
+  set_cost_giou: 2.0
+  focal_alpha: 0.25
+  aux_loss: true
+  sum_group_losses: false
+  use_position_supervised_loss: false
   dont_save_weights: false
-  checkpoint_interval: 10
   seed: 42
-  resume: ''
   start_epoch: 0
   eval: false
-  use_ema: false
-  ema_decay: 0.9997
-  ema_tau: 0
-  num_workers: 2
-  warmup_epochs: 1.0
   lr_scheduler: step
   lr_milestones:
   - 80
@@ -121,26 +144,12 @@ train:
   lr_stable_ratio: 0.7
   lr_restart_period: 50
   lr_restart_decay: 0.8
-  early_stopping: true
-  early_stopping_patience: 10
-  early_stopping_min_delta: 0.001
-  early_stopping_use_ema: false
   debug_data_limit: 0
-  multi_scale: false
-  expanded_scales: false
-  do_random_resize_via_padding: false
   use_cls_token: false
   encoder_only: false
   backbone_only: false
   fp16_eval: false
-  freeze_encoder: false
-  freeze_decoder: false
-  freeze_detection_head: false
-  use_convnext_projector: true
-  tensorboard: false
-  wandb: false
   pretrain_weights: null
-  output_dir: output/train_scratch_base
 system:
   device: cuda
   world_size: 1

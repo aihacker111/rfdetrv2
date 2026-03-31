@@ -47,6 +47,8 @@ class TrainConfig(BaseModel):
     multi_scale: bool = True
     expanded_scales: bool = True
     do_random_resize_via_padding: bool = False
+    document_table2_augment: bool = False
+    document_table2_p: float = 0.5
     use_ema: bool = True
     num_workers: int = 2
     weight_decay: float = 1e-4

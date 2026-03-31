@@ -32,6 +32,7 @@ import torchvision
 from PIL import Image
 
 import rfdetrv2.data.transforms as T
+from rfdetrv2.data.transforms_document import DocumentTable2Augment
 
 if TYPE_CHECKING:
     from pycocotools.coco import COCO
@@ -189,7 +190,17 @@ class ConvertCoco(object):
         return image, target
 
 
-def make_coco_transforms(image_set: str, resolution: int, multi_scale: bool = False, expanded_scales: bool = False, skip_random_resize: bool = False, patch_size: int = 16, num_windows: int = 4) -> T.Compose:
+def make_coco_transforms(
+    image_set: str,
+    resolution: int,
+    multi_scale: bool = False,
+    expanded_scales: bool = False,
+    skip_random_resize: bool = False,
+    patch_size: int = 16,
+    num_windows: int = 4,
+    document_table2_augment: bool = False,
+    document_table2_p: float = 0.5,
+) -> T.Compose:
 
     normalize = T.Compose([
         T.ToTensor(),
@@ -205,34 +216,47 @@ def make_coco_transforms(image_set: str, resolution: int, multi_scale: bool = Fa
         print(scales)
 
     if image_set == 'train':
-        return T.Compose([
+        blocks: List[Any] = [
             T.RandomHorizontalFlip(),
             T.RandomSelect(
-                T.RandomResize(scales, max_size=1333),
+                T.RandomResize(scales, max_size=1333, size_divisor=patch_size),
                 T.Compose([
-                    T.RandomResize([400, 500, 600]),
+                    T.RandomResize([400, 500, 600], max_size=None, size_divisor=patch_size),
                     T.RandomSizeCrop(384, 600),
-                    T.RandomResize(scales, max_size=1333),
-                ])
+                    T.RandomResize(scales, max_size=1333, size_divisor=patch_size),
+                ]),
             ),
-            normalize,
-        ])
+        ]
+        if document_table2_augment:
+            blocks.append(DocumentTable2Augment(p=document_table2_p, patch_size=patch_size))
+        blocks.append(normalize)
+        return T.Compose(blocks)
 
     if image_set == 'val':
         return T.Compose([
-            T.RandomResize([resolution], max_size=1333),
+            T.RandomResize([resolution], max_size=1333, size_divisor=patch_size),
             normalize,
         ])
     if image_set == 'val_speed':
         return T.Compose([
-            T.SquareResize([resolution]),
+            T.SquareResize([resolution], size_divisor=patch_size),
             normalize,
         ])
 
     raise ValueError(f'unknown {image_set}')
 
 
-def make_coco_transforms_square_div_64(image_set: str, resolution: int, multi_scale: bool = False, expanded_scales: bool = False, skip_random_resize: bool = False, patch_size: int = 16, num_windows: int = 4) -> T.Compose:
+def make_coco_transforms_square_div_64(
+    image_set: str,
+    resolution: int,
+    multi_scale: bool = False,
+    expanded_scales: bool = False,
+    skip_random_resize: bool = False,
+    patch_size: int = 16,
+    num_windows: int = 4,
+    document_table2_augment: bool = False,
+    document_table2_p: float = 0.5,
+) -> T.Compose:
 
     normalize = T.Compose([
         T.ToTensor(),
@@ -249,32 +273,35 @@ def make_coco_transforms_square_div_64(image_set: str, resolution: int, multi_sc
         print(scales)
 
     if image_set == 'train':
-        return T.Compose([
+        blocks_sq: List[Any] = [
             T.RandomHorizontalFlip(),
             T.RandomSelect(
-                T.SquareResize(scales),
+                T.SquareResize(scales, size_divisor=patch_size),
                 T.Compose([
-                    T.RandomResize([400, 500, 600]),
+                    T.RandomResize([400, 500, 600], max_size=None, size_divisor=patch_size),
                     T.RandomSizeCrop(384, 600),
-                    T.SquareResize(scales),
+                    T.SquareResize(scales, size_divisor=patch_size),
                 ]),
             ),
-            normalize,
-        ])
+        ]
+        if document_table2_augment:
+            blocks_sq.append(DocumentTable2Augment(p=document_table2_p, patch_size=patch_size))
+        blocks_sq.append(normalize)
+        return T.Compose(blocks_sq)
 
     if image_set == 'val':
         return T.Compose([
-            T.SquareResize([resolution]),
+            T.SquareResize([resolution], size_divisor=patch_size),
             normalize,
         ])
     if image_set == 'test':
         return T.Compose([
-            T.SquareResize([resolution]),
+            T.SquareResize([resolution], size_divisor=patch_size),
             normalize,
         ])
     if image_set == 'val_speed':
         return T.Compose([
-            T.SquareResize([resolution]),
+            T.SquareResize([resolution], size_divisor=patch_size),
             normalize,
         ])
 
@@ -444,6 +471,8 @@ def maybe_apply_coco_category_inference_to_cfg(cfg: Any) -> None:
     names, k, lid = inferred
     setattr(cfg, "class_names", names)
     setattr(cfg, "label_to_cat_id", list(lid))
+    # Pipeline must not replace these with checkpoint COCO dict when loading pretrain_weights.
+    setattr(cfg, "_class_names_inferred_from_coco_ann", True)
     cur = getattr(cfg, "num_classes", None)
     try:
         cur_i = int(cur) if cur is not None else None
@@ -573,6 +602,8 @@ def build_coco(image_set: str, args: Any, resolution: int) -> CocoDetection:
         skip_random_resize=skip_random_resize,
         patch_size=patch_size,
         num_windows=num_windows,
+        document_table2_augment=getattr(args, "document_table2_augment", False),
+        document_table2_p=float(getattr(args, "document_table2_p", 0.5)),
     )
     return CocoDetection(
         img_folder,
@@ -604,6 +635,8 @@ def build_roboflow_from_coco(image_set: str, args: Any, resolution: int) -> Coco
     patch_size = getattr(args, "patch_size", 16)
     num_windows = getattr(args, "num_windows", 4)
 
+    doc_t2 = getattr(args, "document_table2_augment", False)
+    doc_t2_p = float(getattr(args, "document_table2_p", 0.5))
     if square_resize_div_64:
         dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms_square_div_64(
             image_set,
@@ -612,7 +645,9 @@ def build_roboflow_from_coco(image_set: str, args: Any, resolution: int) -> Coco
             expanded_scales=expanded_scales,
             skip_random_resize=not do_random_resize_via_padding,
             patch_size=patch_size,
-            num_windows=num_windows
+            num_windows=num_windows,
+            document_table2_augment=doc_t2,
+            document_table2_p=doc_t2_p,
         ), include_masks=include_masks)
     else:
         dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(
@@ -622,6 +657,8 @@ def build_roboflow_from_coco(image_set: str, args: Any, resolution: int) -> Coco
             expanded_scales=expanded_scales,
             skip_random_resize=not do_random_resize_via_padding,
             patch_size=patch_size,
-            num_windows=num_windows
+            num_windows=num_windows,
+            document_table2_augment=doc_t2,
+            document_table2_p=doc_t2_p,
         ), include_masks=include_masks)
     return dataset

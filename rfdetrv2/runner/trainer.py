@@ -114,19 +114,37 @@ class Pipeline:
             except Exception:
                 pass
 
-            ck = checkpoint.get("args") or checkpoint.get("cfg")
-            if ck is not None and hasattr(ck, "class_names"):
-                self.cfg.class_names = ck.class_names
-                self.class_names = ck.class_names
-            elif isinstance(checkpoint.get("cfg"), dict):
-                cn = checkpoint["cfg"].get("class_names")
-                if cn is not None:
-                    self.cfg.class_names = cn
-                    self.class_names = cn
+            skip_ckpt_names = getattr(cfg, "_class_names_inferred_from_coco_ann", False)
+            if not skip_ckpt_names:
+                ck = checkpoint.get("args") or checkpoint.get("cfg")
+                if ck is not None and hasattr(ck, "class_names"):
+                    self.cfg.class_names = ck.class_names
+                    self.class_names = ck.class_names
+                elif isinstance(checkpoint.get("cfg"), dict):
+                    cn = checkpoint["cfg"].get("class_names")
+                    if cn is not None:
+                        self.cfg.class_names = cn
+                        self.class_names = cn
 
-            checkpoint_num_classes = checkpoint['model']['class_embed.bias'].shape[0]
-            if checkpoint_num_classes != cfg.num_classes + 1:
-                self.reinitialize_detection_head(checkpoint_num_classes)
+            checkpoint_num_classes = checkpoint["model"]["class_embed.bias"].shape[0]
+            target_logits = int(cfg.num_classes) + 1
+            if checkpoint_num_classes != target_logits:
+                # Avoid shape-mismatch load on class heads; backbone still loads. Model head matches cfg from build_model.
+                dropped = [
+                    k
+                    for k in list(checkpoint["model"].keys())
+                    if "class_embed" in k or "enc_out_class_embed" in k
+                ]
+                for k in dropped:
+                    checkpoint["model"].pop(k, None)
+                if utils.is_main_process():
+                    logger.info(
+                        "Pretrain checkpoint has %s class logits; this run uses %s (K+1). "
+                        "Skipping %d class-head tensor(s) so backbone loads; classification head is freshly initialized.",
+                        checkpoint_num_classes,
+                        target_logits,
+                        len(dropped),
+                    )
 
             if cfg.pretrain_exclude_keys is not None:
                 assert isinstance(cfg.pretrain_exclude_keys, list)
@@ -154,6 +172,9 @@ class Pipeline:
                     checkpoint['model'][name] = state[:num_desired_queries]
 
             self.model.load_state_dict(checkpoint['model'], strict=False)
+
+        if getattr(self, "class_names", None) is None:
+            self.class_names = getattr(cfg, "class_names", None)
 
         if cfg.backbone_lora:
             try:
