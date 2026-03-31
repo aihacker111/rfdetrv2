@@ -26,6 +26,7 @@ from rfdetrv2.detr._util import pydantic_dump
 from rfdetrv2.schemas import ModelConfig, TrainConfig
 from rfdetrv2.runner import Pipeline
 from rfdetrv2.runner.inference import predict_detections
+from rfdetrv2.utils.detection_io import save_prediction_images
 from rfdetrv2.utils.coco_classes import COCO_CLASSES
 from rfdetrv2.utils.metrics import MetricsPlotSink, MetricsTensorBoardSink, MetricsWandBSink
 
@@ -272,21 +273,42 @@ class RFDETRV2:
                 as file paths, PIL Images, NumPy arrays, or torch.Tensors.
             threshold (float, optional):
                 The minimum confidence score needed to consider a detected bounding box valid.
+            save_path (optional):
+                If set, save annotated image(s) to this ``.png``/``.jpg`` path or directory.
+            ndarray_is_bgr (optional):
+                Set True when ``images`` are NumPy arrays in OpenCV BGR order.
             **kwargs:
-                Additional keyword arguments.
+                Passed to the detector (e.g. ``means``, ``stds``).
 
         Returns:
             Union[sv.Detections, List[sv.Detections]]: A single or multiple Detections
                 objects, each containing bounding box coordinates, confidence scores,
                 and class IDs.
         """
-        return predict_detections(
+        save_path = kwargs.pop("save_path", None)
+        ndarray_is_bgr = bool(kwargs.pop("ndarray_is_bgr", False))
+        means = kwargs.pop("means", None)
+        stds = kwargs.pop("stds", None)
+        if kwargs:
+            logger.warning("RFDETRV2.predict: ignoring unknown kwargs %s", sorted(kwargs.keys()))
+        out = predict_detections(
             self.model,
             images,
             threshold,
-            means=self.means,
-            stds=self.stds,
+            means=means if means is not None else self.means,
+            stds=stds if stds is not None else self.stds,
         )
+        if save_path is not None:
+            from pathlib import Path
+
+            save_prediction_images(
+                images,
+                out,
+                Path(save_path),
+                class_names=self.class_names,
+                ndarray_is_bgr=ndarray_is_bgr,
+            )
+        return out
 
     def deploy_to_roboflow(self, workspace: str, project_id: str, version: str, api_key: str = None, size: str = None):
         """

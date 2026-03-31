@@ -40,6 +40,8 @@ from rfdetrv2.cfg.loader import load_run_config, merge_namespace, namespace_to_d
 from rfdetrv2.data import build_dataset, get_coco_api_from_dataset
 from rfdetrv2.models import PostProcess, build_criterion_and_postprocessors, build_model
 from rfdetrv2.runner.inference import IMAGENET_MEAN, IMAGENET_STD, predict_detections
+from rfdetrv2.utils.coco_classes import COCO_CLASSES
+from rfdetrv2.utils.detection_io import save_prediction_images
 from rfdetrv2.runner.loops import evaluate, train_one_epoch
 from rfdetrv2.utils.benchmark import benchmark
 from rfdetrv2.utils.drop_scheduler import drop_scheduler
@@ -246,14 +248,38 @@ class Pipeline:
         self._sync_frozen_params_from_cfg(self.cfg)
         return self
 
+    def _class_names_for_viz(self):
+        cn = getattr(self, "class_names", None)
+        if cn is None:
+            return COCO_CLASSES
+        if isinstance(cn, list):
+            return {i + 1: str(n) for i, n in enumerate(cn)}
+        return cn
+
     def predict(
         self,
         images,
         threshold: float = 0.5,
+        *,
+        save_path: str | Path | None = None,
+        ndarray_is_bgr: bool = False,
         **kwargs,
     ):
-        """Run detection (same preprocessing as ``RFDETRV2.predict``)."""
-        return predict_detections(self, images, threshold, **kwargs)
+        """Run detection (same preprocessing as ``RFDETRV2.predict``).
+
+        If ``save_path`` is set, writes annotated images (``.png`` file or output directory).
+        NumPy arrays are assumed RGB unless ``ndarray_is_bgr=True`` (e.g. raw ``cv2`` frames).
+        """
+        dets = predict_detections(self, images, threshold, **kwargs)
+        if save_path is not None:
+            save_prediction_images(
+                images,
+                dets,
+                Path(save_path),
+                class_names=self._class_names_for_viz(),
+                ndarray_is_bgr=ndarray_is_bgr,
+            )
+        return dets
 
     def optimize_for_inference(self, compile=True, batch_size=1, dtype=torch.float32):
         """Deep-copy detector, call ``export()`` mode, optional ``torch.jit.trace``."""
