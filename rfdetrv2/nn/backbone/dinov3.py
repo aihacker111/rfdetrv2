@@ -58,6 +58,14 @@ SIZE_TO_HUB_NAME: dict[str, str] = {
     "large": "dinov3_vitl16",
 }
 
+# HuggingFace LVD1689M filenames in ``dinov3_pretrained/`` (see ``utils/dinov3_pretrained.py``).
+# ``dinov3_vitl16`` is not in that manifest — supply ``pretrained_encoder`` or place a ``.pth`` manually.
+_HUB_NAME_TO_DEFAULT_PTH: dict[str, str] = {
+    "dinov3_vits16": "dinov3_vits16_pretrain_lvd1689m-08c60483.pth",
+    "dinov3_vits16plus": "dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth",
+    "dinov3_vitb16": "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
+}
+
 # Kept for backwards-compatibility with call-sites that used the old names.
 size_to_width   = SIZE_TO_WIDTH
 size_to_hub_name = SIZE_TO_HUB_NAME
@@ -306,7 +314,9 @@ class DinoV3(nn.Module):
         continues otherwise.
     pretrained_encoder:
         One of:
-        - ``None``: auto-discover ``<hub_name>*.pth`` in the project root.
+        - ``None``: look for ``<hub_name>*.pth`` in the project root and in
+          ``<project>/dinov3_pretrained/``; for ViT-S/S+/B, download the LVD1689M
+          checkpoint from HuggingFace into ``dinov3_pretrained/`` if still missing.
         - ``"/path/to/weights.pth"``: load weights from that ``.pth`` using the DINOv3
           source tree at ``dinov3_hub_repo_dir()`` (default ``<project>/dinov3``; if
           ``hubconf.py`` is missing it is fetched as a zip into that folder; override
@@ -433,14 +443,45 @@ class DinoV3(nn.Module):
     ) -> Tuple[str, str]:
         """Return ``(repo_or_dir, weights_path)`` for ``torch.hub.load(..., source='local')``."""
         if pretrained_encoder is None:
+            from rfdetrv2.utils.dinov3_pretrained import (
+                dinov3_pretrained_dir,
+                download_dinov3_pretrained_weights,
+            )
+
             project_root = Path(__file__).resolve().parents[3]
+            pre_dir = dinov3_pretrained_dir(project_root)
             candidates = sorted(project_root.glob(f"{hub_name}*.pth"))
+            if not candidates:
+                candidates = sorted(pre_dir.glob(f"{hub_name}*.pth"))
+            default_name = _HUB_NAME_TO_DEFAULT_PTH.get(hub_name)
+            if not candidates and default_name:
+                p = pre_dir / default_name
+                if p.is_file():
+                    candidates = [p]
+                else:
+                    logger.info(
+                        "DINOv3 weights for hub=%r not under project root or %s — "
+                        "downloading %s from HuggingFace.",
+                        hub_name,
+                        pre_dir,
+                        default_name,
+                    )
+                    download_dinov3_pretrained_weights(
+                        project_root=project_root,
+                        manifest=[(default_name, default_name)],
+                    )
+                    if p.is_file():
+                        candidates = [p]
             if not candidates:
                 raise FileNotFoundError(
                     f"Could not find local DINOv3 weights for '{hub_name}'. "
-                    f"Place a file like '{hub_name}*.pth' in the project root, "
-                    "or pass pretrained_encoder='/path/to/weights.pth' "
-                    "(or 'path/to/dinov3::path/to/weights.pth')."
+                    f"Expected '{hub_name}*.pth' in the project root ({project_root}) or in "
+                    f"{pre_dir}, or pass pretrained_encoder='/path/to/weights.pth'. "
+                    + (
+                        "For ViT-L, add a matching checkpoint manually (no auto-download in this repo)."
+                        if hub_name == "dinov3_vitl16"
+                        else ""
+                    )
                 )
             repo = dinov3_hub_repo_dir()
             return str(repo), str(candidates[0])

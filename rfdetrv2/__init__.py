@@ -24,6 +24,7 @@ from rfdetrv2.runner import (
     evaluate,
     load_config,
     predict_detections,
+    resolve_pretrain_weights_path,
     train_one_epoch,
 )
 
@@ -39,5 +40,6 @@ __all__ = [
     "evaluate",
     "load_config",
     "predict_detections",
+    "resolve_pretrain_weights_path",
     "train_one_epoch",
 ]

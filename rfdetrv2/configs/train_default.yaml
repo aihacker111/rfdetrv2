@@ -2,7 +2,7 @@
 # Override with your paths; CLI: key=value pairs after --config are merged last.
 
 model:
-  encoder: dinov3_small
+  encoder: dinov3_base
   vit_encoder_num_layers: 12
   window_block_indexes: null
   position_embedding: sine
@@ -65,6 +65,7 @@ train:
   drop_schedule: constant
   cutoff_epoch: 0
   pretrained_encoder: null
+  # null | /path/to.pth | https://... | HF aliases: rfdetrv2_base, base, rfdetrv2_nano, ...
   pretrain_weights: null
   pretrain_exclude_keys: null
   pretrain_keys_modify_to_load: null

@@ -43,8 +43,12 @@ from rfdetrv2.runner.inference import IMAGENET_MEAN, IMAGENET_STD, predict_detec
 from rfdetrv2.runner.loops import evaluate, train_one_epoch
 from rfdetrv2.utils.benchmark import benchmark
 from rfdetrv2.utils.drop_scheduler import drop_scheduler
-from rfdetrv2.utils.files import download_file
 from rfdetrv2.utils.get_param_dicts import get_param_dict
+from rfdetrv2.utils.rfdetr_pretrained import (
+    HF_BASE_URL,
+    RFDETR_COCO_CHECKPOINT_BY_SIZE,
+    resolve_pretrain_weights_path,
+)
 from rfdetrv2.utils.utils import BestMetricHolder, ModelEma, clean_state_dict
 
 if str(os.environ.get("USE_FILE_SYSTEM_SHARING", "False")).lower() in ["true", "1"]:
@@ -53,15 +57,23 @@ if str(os.environ.get("USE_FILE_SYSTEM_SHARING", "False")).lower() in ["true", "
 
 logger = getLogger(__name__)
 
-# Optional: map short checkpoint keys to download URLs (extend as needed).
-HOSTED_MODELS: dict[str, str] = {}
+# HuggingFace COCO checkpoints (https://huggingface.co/myn0908/rfdetrv2) — for docs / tooling.
+HOSTED_MODELS: dict[str, str] = {
+    **{
+        f"rfdetrv2_{k}": f"{HF_BASE_URL.rstrip('/')}/{v}?download=true"
+        for k, v in RFDETR_COCO_CHECKPOINT_BY_SIZE.items()
+    },
+    **{
+        v: f"{HF_BASE_URL.rstrip('/')}/{v}?download=true"
+        for v in RFDETR_COCO_CHECKPOINT_BY_SIZE.values()
+    },
+}
 
 
-def download_pretrain_weights(pretrain_weights: str, redownload=False):
-    if pretrain_weights in HOSTED_MODELS:
-        if redownload or not os.path.exists(pretrain_weights):
-            logger.info(f"Downloading pretrained weights for {pretrain_weights}")
-            download_file(HOSTED_MODELS[pretrain_weights], pretrain_weights)
+def download_pretrain_weights(pretrain_weights: str, redownload: bool = False) -> str:
+    """Resolve *pretrain_weights* to a local ``.pth`` (download HF / URL if needed)."""
+    proj = Path(__file__).resolve().parents[2]
+    return resolve_pretrain_weights_path(pretrain_weights, proj, redownload=redownload)
 
 
 class Pipeline:
@@ -82,13 +94,18 @@ class Pipeline:
 
         if cfg.pretrain_weights is not None:
             print("Loading pretrain weights")
+            weight_path = download_pretrain_weights(cfg.pretrain_weights, redownload=False)
             try:
-                checkpoint = torch.load(cfg.pretrain_weights, map_location='cpu', weights_only=False)
+                checkpoint = torch.load(weight_path, map_location="cpu", weights_only=False)
             except Exception as e:
                 print(f"Failed to load pretrain weights: {e}")
                 print("Failed to load pretrain weights, re-downloading")
-                download_pretrain_weights(cfg.pretrain_weights, redownload=True)
-                checkpoint = torch.load(cfg.pretrain_weights, map_location='cpu', weights_only=False)
+                weight_path = download_pretrain_weights(cfg.pretrain_weights, redownload=True)
+                checkpoint = torch.load(weight_path, map_location="cpu", weights_only=False)
+            try:
+                setattr(cfg, "pretrain_weights", weight_path)
+            except Exception:
+                pass
 
             ck = checkpoint.get("args") or checkpoint.get("cfg")
             if ck is not None and hasattr(ck, "class_names"):
