@@ -173,7 +173,9 @@ class TrainingPipeline(BasePipeline):
             epoch_start = time.time()
 
             if args.distributed:
-                data_loaders["train"].sampler.set_epoch(epoch)
+                # With BatchSampler, loader.sampler is SequentialSampler over batch indices;
+                # DistributedSampler lives on batch_sampler.sampler.
+                self._set_distributed_sampler_epoch(data_loaders["train"], epoch)
 
             model.train()
             criterion.train()
@@ -265,6 +267,19 @@ class TrainingPipeline(BasePipeline):
         for cb in self.callbacks["on_train_end"]:
             cb()
 
+    @staticmethod
+    def _set_distributed_sampler_epoch(train_loader: DataLoader, epoch: int) -> None:
+        """Advance epoch on DistributedSampler (plain or wrapped by BatchSampler)."""
+        bs = getattr(train_loader, "batch_sampler", None)
+        if bs is not None:
+            inner = getattr(bs, "sampler", None)
+            if inner is not None and hasattr(inner, "set_epoch"):
+                inner.set_epoch(epoch)
+                return
+        sampler = getattr(train_loader, "sampler", None)
+        if sampler is not None and hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(epoch)
+
     # ------------------------------------------------------------------
     # Builders
     # ------------------------------------------------------------------
@@ -345,9 +360,13 @@ class TrainingPipeline(BasePipeline):
             logger.warning(
                 "Dataset is very small (%d samples). Using replacement sampler.", len(dataset_train)
             )
-            train_sampler = torch.utils.data.RandomSampler(
-                dataset_train, replacement=True, num_samples=effective_bs * min_batches
-            )
+            if args.distributed:
+                # Keep DistributedSampler so set_epoch / sharding stay correct (no RandomSampler).
+                train_sampler = DistributedSampler(dataset_train, shuffle=True)
+            else:
+                train_sampler = torch.utils.data.RandomSampler(
+                    dataset_train, replacement=True, num_samples=effective_bs * min_batches
+                )
             loader_train = DataLoader(
                 dataset_train, batch_size=effective_bs,
                 sampler=train_sampler, collate_fn=utils.collate_fn,
