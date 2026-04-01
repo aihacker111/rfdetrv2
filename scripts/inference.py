@@ -2,311 +2,256 @@
 """
 RF-DETR v2 — inference on a single image or video.
 
-``num_classes`` and display names are taken **only** from the checkpoint:
-
-  * **K** (foreground classes): detection-head tensor shapes, else ``len(class_names)``,
-    else ``args.num_classes``.
-  * **Names**: top-level ``class_names`` (list or dict ``{1: "Caption", …}``), else
-    ``args.class_names`` (list or dict), else ``class_0`` … for missing keys.
+Model size, num_classes, and class names are read **automatically** from
+the checkpoint — no need to specify them manually.  This works correctly
+for any fine-tuned checkpoint (custom dataset, different class counts).
 
 Usage
 -----
-  python scripts/inference.py --weights out/checkpoint_best_total.pth --image a.png --save out.png
-  python scripts/inference.py --weights model.pth --video clip.mp4 --output clip_det.mp4
+  # Image
+  python inference.py --weights runs/exp1/checkpoint_best_total.pth --image photo.jpg
+  python inference.py --weights runs/exp1/checkpoint_best_total.pth --image photo.jpg --save out.jpg
+
+  # Video
+  python inference.py --weights runs/exp1/checkpoint_best_total.pth --video clip.mp4
+  python inference.py --weights runs/exp1/checkpoint_best_total.pth --video clip.mp4 --output det.mp4
 """
+
 from __future__ import annotations
 
 import argparse
-import os
-import re
 import sys
-from collections import Counter
 from pathlib import Path
 
 import cv2
 import numpy as np
-import supervision as sv
 import torch
+from PIL import Image
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
-from rfdetrv2 import RFDETRV2Base, RFDETRV2Large, RFDETRV2Nano, RFDETRV2Small
-from rfdetrv2.util.dinov3_pretrained import resolve_pretrained_encoder_path
+from rfdetrv2 import RFDETRBase, RFDETRLarge, RFDETRNano, RFDETRSmall
 
-DEFAULT_PRETRAINED = os.environ.get("PRETRAINED_ENCODER")
 
-DINO_WEIGHTS_BY_SIZE = {
-    "nano": "dinov3_vits16_pretrain_lvd1689m-08c60483.pth",
-    "small": "dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth",
-    "base": "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
-    "large": "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
+# ─────────────────────────────────────────────────────────────────
+# Checkpoint helpers
+# ─────────────────────────────────────────────────────────────────
+
+# Maps (encoder_name, resolution) → model class.
+# Both Base and Large share dinov3_base — distinguish by resolution.
+_ENCODER_TO_MODEL = {
+    "dinov3_nano":  RFDETRNano,
+    "dinov3_small": RFDETRSmall,
+    "dinov3_base":  RFDETRBase,   # resolution <= 560 → Base
+    "dinov3_large": RFDETRLarge,
 }
 
-_MODELS = {
-    "nano": RFDETRV2Nano,
-    "small": RFDETRV2Small,
-    "base": RFDETRV2Base,
-    "large": RFDETRV2Large,
-}
 
-
-def _infer_k_from_state(state: dict) -> int | None:
-    """Foreground count K from class-head biases (K+1 logits including background)."""
-    n_outs: list[int] = []
-    for key, tensor in state.items():
-        if not isinstance(key, str) or not hasattr(tensor, "shape") or tensor.ndim < 1:
-            continue
-        if not (
-            key.endswith("class_embed.bias")
-            or re.search(r"enc_out_class_embed\.\d+\.bias$", key)
-        ):
-            continue
-        n = int(tensor.shape[0])
-        if n >= 2:
-            n_outs.append(n)
-    if not n_outs:
-        return None
-    n_out, _ = Counter(n_outs).most_common(1)[0]
-    return n_out - 1
-
-
-def _resolve_state_dict(ckpt: dict) -> dict | None:
-    if not isinstance(ckpt, dict):
-        return None
-    for name in ("model", "ema_model", "model_ema", "state_dict"):
-        inner = ckpt.get(name)
-        if isinstance(inner, dict) and _infer_k_from_state(inner) is not None:
-            return inner
-    tensors = {k: v for k, v in ckpt.items() if isinstance(k, str) and isinstance(v, torch.Tensor)}
-    if _infer_k_from_state(tensors) is not None:
-        return tensors
-    return None
-
-
-def _names_from_checkpoint(ckpt: dict) -> dict[int, str]:
-    """Build ``{1: name, …}`` from checkpoint metadata only (may be empty)."""
-    raw = ckpt.get("class_names")
-    if isinstance(raw, dict) and raw:
-        return {int(k): str(v) for k, v in raw.items()}
-    if isinstance(raw, (list, tuple)) and raw:
-        return {i + 1: str(n) for i, n in enumerate(raw)}
-    a = ckpt.get("args")
-    if a is None:
-        return {}
-    cn = getattr(a, "class_names", None)
-    if isinstance(cn, (list, tuple)) and cn:
-        return {i + 1: str(n) for i, n in enumerate(cn)}
-    if isinstance(cn, dict) and cn:
-        return {int(k): str(v) for k, v in cn.items()}
-    return {}
-
-
-def _parse_checkpoint_meta(ckpt: dict) -> tuple[int, dict[int, str], int]:
+def _load_checkpoint_meta(weights: str) -> tuple[type, int, dict[int, str]]:
     """
-    Return ``(K, {1..K: name})`` using only checkpoint contents.
+    Read the checkpoint and return:
+      - model_class  : the right RFDETRxxx class
+      - num_classes  : number of foreground classes
+      - class_names  : {1: "Caption", 2: "Footnote", …}
 
-    **K** (architecture, must match saved tensors): weights first, else name list length,
-    else ``args.num_classes``.
-
-    **Labels**: use every name stored in the checkpoint for keys ``1 .. len(names)``; any
-    missing key up to ``K`` gets ``class_{j}`` (0-based index). This covers the common
-    case where metadata lists 11 DocLayNet classes but the file still has a 90-class
-    COCO head — your 11 names are kept for logits ``0..10``.
+    All three values come from ``ckpt['args']`` which is always saved
+    during fine-tuning.  Falls back to detection-head tensor shape for
+    checkpoints that pre-date the ``class_names`` field.
     """
-    state = _resolve_state_dict(ckpt)
-    k_w = _infer_k_from_state(state) if state else None
-    raw = _names_from_checkpoint(ckpt)
-    k_n = len(raw) if raw else None
-    a = ckpt.get("args")
-    k_a = None
-    if a is not None and getattr(a, "num_classes", None) is not None:
-        k_a = int(a.num_classes)
-
-    if k_w is not None and k_w > 0:
-        k = k_w
-    elif k_n is not None and k_n > 0:
-        k = k_n
-    elif k_a is not None and k_a > 0:
-        k = k_a
-    else:
-        raise SystemExit(
-            "Cannot infer num_classes from checkpoint. Need detection-head tensors, "
-            "a ``class_names`` list, or ``args.num_classes``. "
-            "Re-save with a recent train/finetune run, or use checkpoint_best_total.pth."
-        )
-
-    if k_w and k_n and k_n != k_w:
-        print(
-            f"[inference] Warning: weights imply K={k_w} classes but checkpoint lists "
-            f"{k_n} name(s) (e.g. fine-tune metadata + COCO-sized head). "
-            f"Using K={k} for loading; showing stored names for classes 1..{k_n}, "
-            "generic labels for the rest. Re-fine-tune so the head matches your dataset.",
-            file=sys.stderr,
-        )
-
-    names: dict[int, str] = {}
-    for i in range(1, k + 1):
-        if i in raw:
-            names[i] = raw[i]
-        else:
-            names[i] = f"class_{i - 1}"
-
-    n_meta = len(raw) if raw else 0
-    return k, names, n_meta
-
-
-def _label_name(cls_id: int, class_names: dict[int, str]) -> str:
-    raw = int(cls_id)
-    for key in (raw, raw + 1):
-        val = class_names.get(key)
-        if isinstance(val, str):
-            return val
-    return str(raw)
-
-
-def _merge_overlapping_detections(detections: sv.Detections, labels: list, box_eps: float = 2.0):
-    if len(detections) == 0:
-        return detections, labels
-    xyxy = np.asarray(detections.xyxy)
-    conf = np.asarray(detections.confidence)
-    cls_id = np.asarray(detections.class_id)
-    merged_xyxy, merged_conf, merged_cls, merged_labels = [], [], [], []
-    used = [False] * len(detections)
-    for i in range(len(detections)):
-        if used[i]:
-            continue
-        box = xyxy[i]
-        group = [i]
-        for j in range(i + 1, len(detections)):
-            if used[j]:
-                continue
-            if np.all(np.abs(xyxy[j] - box) < box_eps):
-                group.append(j)
-                used[j] = True
-        used[i] = True
-        merged_xyxy.append(box)
-        merged_conf.append(conf[group[0]])
-        merged_cls.append(cls_id[group[0]])
-        merged_labels.append("\n".join(labels[k] for k in group))
-    return (
-        sv.Detections(
-            xyxy=np.array(merged_xyxy),
-            confidence=np.array(merged_conf),
-            class_id=np.array(merged_cls),
-        ),
-        merged_labels,
-    )
-
-
-def _load_model(weights: str, model_size: str, device: str, pretrained_encoder: str | None):
     path = Path(weights)
-    if not path.is_file():
-        raise FileNotFoundError(weights)
+    if not path.exists():
+        sys.exit(f"[error] Checkpoint not found: {weights}")
+
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     if not isinstance(ckpt, dict):
-        raise SystemExit("Checkpoint must be a dict (.pth with model/args or training format).")
+        sys.exit("[error] Checkpoint must be a .pth dict saved by the rfdetrv2 trainer.")
 
-    k, class_names, n_meta = _parse_checkpoint_meta(ckpt)
-    if n_meta and n_meta < k:
-        print(
-            f"[inference] num_classes={k} (from checkpoint head); "
-            f"{n_meta} name(s) from metadata, {k - n_meta} generic (class indices {n_meta}..{k - 1}).",
-            file=sys.stderr,
+    args = ckpt.get("args")
+
+    # ── num_classes ──────────────────────────────────────────────
+    # Primary source: args.num_classes (always present after fine-tuning)
+    num_classes = getattr(args, "num_classes", None)
+
+    # Fallback: read from detection-head tensor shape (K+1 logits)
+    if num_classes is None:
+        state = ckpt.get("model", {})
+        bias = state.get("class_embed.bias")
+        if bias is not None:
+            num_classes = int(bias.shape[0]) - 1  # subtract background
+
+    if num_classes is None or num_classes < 1:
+        sys.exit(
+            "[error] Cannot determine num_classes from checkpoint.\n"
+            "  → Re-save with a recent fine-tune run, or use checkpoint_best_total.pth."
         )
+
+    # ── class_names ──────────────────────────────────────────────
+    # args.class_names is a list ["Caption", "Footnote", …] after fine-tuning
+    raw_names = getattr(args, "class_names", None)
+    if isinstance(raw_names, (list, tuple)) and raw_names:
+        # COCO convention: category ids start at 1
+        class_names = {i + 1: str(n) for i, n in enumerate(raw_names)}
+    elif isinstance(raw_names, dict) and raw_names:
+        class_names = {int(k): str(v) for k, v in raw_names.items()}
     else:
+        # No names stored — use generic labels
+        class_names = {i + 1: f"class_{i}" for i in range(num_classes)}
         print(
-            f"[inference] num_classes={k} (from checkpoint); {len(class_names)} label(s).",
-            file=sys.stderr,
+            f"[warning] No class names found in checkpoint.  "
+            f"Using generic labels class_0 … class_{num_classes - 1}."
         )
 
-    enc = pretrained_encoder or DEFAULT_PRETRAINED
-    pretrained = resolve_pretrained_encoder_path(
-        _PROJECT_ROOT,
-        model_size,
-        explicit=enc if enc else None,
-        weights_by_size=DINO_WEIGHTS_BY_SIZE,
+    # ── model class (auto-detect from encoder + resolution) ──────
+    encoder    = getattr(args, "encoder",    "dinov3_base")
+    resolution = getattr(args, "resolution", 560)
+
+    if encoder == "dinov3_base" and resolution > 560:
+        model_class = RFDETRLarge
+    else:
+        model_class = _ENCODER_TO_MODEL.get(encoder, RFDETRBase)
+
+    print(
+        f"[info] Checkpoint: {path.name}\n"
+        f"  model      = {model_class.__name__}  (encoder={encoder}, resolution={resolution})\n"
+        f"  num_classes= {num_classes}\n"
+        f"  classes    = {list(class_names.values())}"
     )
-    model = _MODELS[model_size](
+    return model_class, num_classes, class_names
+
+
+# ─────────────────────────────────────────────────────────────────
+# Model factory
+# ─────────────────────────────────────────────────────────────────
+
+def load_model(weights: str, device: str):
+    """Build and return (model, class_names) ready for inference."""
+    model_class, num_classes, class_names = _load_checkpoint_meta(weights)
+
+    model = model_class(
         pretrain_weights=weights,
-        pretrained_encoder=pretrained,
+        num_classes=num_classes,
         device=device,
-        num_classes=k,
     )
+    # Make class_names available for display
     model._class_names = class_names
     return model, class_names
 
 
-def _run_image(args: argparse.Namespace) -> None:
-    model, class_names = _load_model(
-        args.weights, args.model_size, args.device, args.pretrained_encoder
-    )
-    detections = model.predict(args.image, threshold=args.threshold)
+# ─────────────────────────────────────────────────────────────────
+# Draw helpers
+# ─────────────────────────────────────────────────────────────────
 
-    print(f"Detections: {len(detections)}")
-    for i, (xyxy, conf, cls_id) in enumerate(
-        zip(detections.xyxy, detections.confidence, detections.class_id),
-        start=1,
+# 20 visually distinct BGR colors
+_PALETTE_BGR = [
+    ( 75,  25, 230), ( 75, 180,  60), ( 25, 225, 255), (200, 130,   0),
+    ( 48, 130, 245), (180,  30, 145), (240, 240,  70), (230,  50, 240),
+    ( 60, 245, 210), (212, 190, 250), (128, 128,   0), (255, 190, 220),
+    ( 40, 110, 170), (200, 250, 255), (  0,   0, 128), (195, 255, 170),
+    (  0, 128, 128), (180, 215, 255), (128,   0,   0), (128, 128, 128),
+]
+
+def _color(cat_id: int):
+    return _PALETTE_BGR[int(cat_id) % len(_PALETTE_BGR)]
+
+
+def draw_boxes(
+    image_bgr: np.ndarray,
+    xyxy: np.ndarray,
+    scores: np.ndarray,
+    class_ids: np.ndarray,
+    class_names: dict[int, str],
+    thickness: int = 2,
+    alpha: float = 0.20,
+) -> np.ndarray:
+    """Draw filled + outlined bounding boxes with labels onto a BGR image."""
+    canvas  = image_bgr.copy()
+    overlay = canvas.copy()
+
+    for box, score, cid in zip(xyxy, scores, class_ids):
+        x1, y1, x2, y2 = map(int, box)
+        color = _color(cid)
+        label = f"{class_names.get(int(cid) + 1, class_names.get(int(cid), str(cid)))} {score:.2f}"
+
+        # Filled rectangle on overlay (for alpha blend)
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
+        # Solid border
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), color, thickness)
+
+        # Label background + text
+        font       = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = max(0.35, min(0.55, (x2 - x1) / 200))
+        (tw, th), bl = cv2.getTextSize(label, font, font_scale, 1)
+        ty = max(y1 - 4, th + 4)
+        cv2.rectangle(canvas, (x1, ty - th - bl - 2), (x1 + tw + 4, ty + 2), color, -1)
+        cv2.putText(canvas, label, (x1 + 2, ty - bl),
+                    font, font_scale, (255, 255, 255), 1, cv2.LINE_AA)
+
+    cv2.addWeighted(overlay, alpha, canvas, 1 - alpha, 0, canvas)
+    return canvas
+
+
+# ─────────────────────────────────────────────────────────────────
+# Image inference
+# ─────────────────────────────────────────────────────────────────
+
+def run_image(args: argparse.Namespace) -> None:
+    model, class_names = load_model(args.weights, args.device)
+
+    detections = model.predict(args.image, threshold=args.threshold)
+    print(f"\n[result] {len(detections)} detection(s)")
+
+    for i, (box, conf, cid) in enumerate(
+        zip(detections.xyxy, detections.confidence, detections.class_id), start=1
     ):
-        cls_int = int(cls_id)
-        cls_name = _label_name(cls_int, class_names)
-        x1, y1, x2, y2 = [float(v) for v in xyxy]
-        print(
-            f"{i:03d} | class={cls_name} (id={cls_int}) | conf={float(conf):.4f} "
-            f"| box=[{x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f}]"
-        )
+        name = class_names.get(int(cid) + 1, class_names.get(int(cid), str(cid)))
+        x1, y1, x2, y2 = map(lambda v: round(float(v), 1), box)
+        print(f"  {i:03d}  {name:<20} conf={float(conf):.3f}  box=[{x1},{y1},{x2},{y2}]")
 
     if args.save:
         image_bgr = cv2.imread(args.image)
         if image_bgr is None:
-            raise FileNotFoundError(f"Could not read image: {args.image}")
-        labels = [
-            f"{_label_name(int(cid), class_names)} {float(conf):.2f}"
-            for conf, cid in zip(detections.confidence, detections.class_id)
-        ]
-        draw_detections, draw_labels = _merge_overlapping_detections(detections, labels)
-        box_annotator = sv.BoxAnnotator()
-        label_annotator = sv.LabelAnnotator(
-            text_scale=0.35,
-            text_thickness=1,
-            text_padding=2,
-        )
-        annotated = box_annotator.annotate(scene=image_bgr.copy(), detections=draw_detections)
-        annotated = label_annotator.annotate(
-            scene=annotated, detections=draw_detections, labels=draw_labels
+            sys.exit(f"[error] Cannot read image: {args.image}")
+
+        annotated = draw_boxes(
+            image_bgr,
+            xyxy=detections.xyxy,
+            scores=detections.confidence,
+            class_ids=detections.class_id,
+            class_names=class_names,
         )
         out = Path(args.save)
         out.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(out), annotated)
-        print(f"Saved: {out}")
+        print(f"\n[saved] {out}")
 
 
-def _run_video(args: argparse.Namespace) -> None:
-    model, class_names = _load_model(
-        args.weights, args.model_size, args.device, args.pretrained_encoder
-    )
+# ─────────────────────────────────────────────────────────────────
+# Video inference
+# ─────────────────────────────────────────────────────────────────
+
+def run_video(args: argparse.Namespace) -> None:
+    model, class_names = load_model(args.weights, args.device)
 
     cap = cv2.VideoCapture(args.video)
     if not cap.isOpened():
-        raise RuntimeError(f"Cannot open video: {args.video}")
+        sys.exit(f"[error] Cannot open video: {args.video}")
 
-    fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps    = int(cap.get(cv2.CAP_PROP_FPS)) or 30
+    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     out_path = args.output or str(
-        Path(args.video).parent / (Path(args.video).stem + "_det.mp4")
+        Path(args.video).with_stem(Path(args.video).stem + "_det")
     )
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
+    writer = cv2.VideoWriter(
+        out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height)
+    )
 
-    box_annotator = sv.BoxAnnotator()
-    label_annotator = sv.LabelAnnotator()
-
+    skip  = max(1, args.skip_frames or 1)
     frame_idx = 0
-    skip = max(1, args.skip_frames) if args.skip_frames else 1
 
     try:
         while True:
@@ -314,67 +259,70 @@ def _run_video(args: argparse.Namespace) -> None:
             if not ret:
                 break
 
-            if frame_idx % skip != 0:
-                writer.write(frame_bgr)
-                frame_idx += 1
-                continue
+            if frame_idx % skip == 0:
+                frame_rgb  = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                detections = model.predict(frame_rgb, threshold=args.threshold)
+                frame_bgr  = draw_boxes(
+                    frame_bgr,
+                    xyxy=detections.xyxy,
+                    scores=detections.confidence,
+                    class_ids=detections.class_id,
+                    class_names=class_names,
+                )
 
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            detections = model.predict(frame_rgb, threshold=args.threshold)
-            labels = [
-                f"{_label_name(int(cid), class_names)} {float(conf):.2f}"
-                for conf, cid in zip(detections.confidence, detections.class_id)
-            ]
-            annotated = box_annotator.annotate(scene=frame_bgr.copy(), detections=detections)
-            annotated = label_annotator.annotate(
-                scene=annotated, detections=detections, labels=labels
-            )
-            writer.write(annotated)
+            writer.write(frame_bgr)
 
             if args.show:
-                cv2.imshow("RF-DETR", annotated)
+                cv2.imshow("RF-DETR", frame_bgr)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
 
             frame_idx += 1
-            if frame_idx % 100 == 0:
-                print(f"Processed {frame_idx}/{total_frames} frames")
+            if frame_idx % 200 == 0:
+                print(f"  processed {frame_idx}/{total} frames …")
+
     finally:
         cap.release()
         writer.release()
         if args.show:
             cv2.destroyAllWindows()
 
-    print(f"Saved output to {out_path}")
+    print(f"[saved] {out_path}")
 
+
+# ─────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="RF-DETR v2 image or video inference.")
-    parser.add_argument("--weights", type=str, required=True, help="Checkpoint .pth")
-    parser.add_argument(
-        "--model-size",
-        choices=list(_MODELS.keys()),
-        default="base",
+    p = argparse.ArgumentParser(
+        description="RF-DETR v2 inference — model size and classes auto-detected from checkpoint.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--pretrained-encoder", type=str, default=DEFAULT_PRETRAINED)
-    parser.add_argument("--device", default="cuda", choices=["cuda", "cpu", "mps"])
-    parser.add_argument("--threshold", type=float, default=0.35)
+    p.add_argument("--weights",   required=True,  help="Path to .pth checkpoint.")
+    p.add_argument("--device",    default="cuda",  choices=["cuda", "cpu", "mps"])
+    p.add_argument("--threshold", type=float, default=0.35, help="Confidence threshold.")
 
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--image", type=str, help="Single image path")
-    mode.add_argument("--video", type=str, help="Input video path")
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--image", help="Path to an input image.")
+    mode.add_argument("--video", help="Path to an input video.")
 
-    parser.add_argument("--save", type=str, default=None, help="[image] Annotated output path")
-    parser.add_argument("--output", type=str, default=None, help="[video] Output video path")
-    parser.add_argument("--skip-frames", type=int, default=0, help="[video] Process every Nth frame (0=all)")
-    parser.add_argument("--show", action="store_true", help="[video] Preview window (q to quit)")
+    # Image options
+    p.add_argument("--save",   default=None, help="[image] Save annotated image to this path.")
 
-    args = parser.parse_args()
+    # Video options
+    p.add_argument("--output",      default=None, help="[video] Output video path.")
+    p.add_argument("--skip-frames", type=int, default=0,
+                   help="[video] Run detection every N frames (0 = every frame).")
+    p.add_argument("--show",        action="store_true",
+                   help="[video] Show preview window (press q to quit).")
+
+    args = p.parse_args()
 
     if args.image:
-        _run_image(args)
+        run_image(args)
     else:
-        _run_video(args)
+        run_video(args)
 
 
 if __name__ == "__main__":
