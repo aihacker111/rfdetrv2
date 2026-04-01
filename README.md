@@ -31,16 +31,19 @@ Env shortcuts: `DATASET_DIR`, `OUTPUT_DIR`, `PRETRAINED_ENCODER`, `COCO_WEIGHTS`
 
 ### Single GPU
 
+`run_train.sh` / `run_finetune.sh` **export `CUDA_VISIBLE_DEVICES`** with default **`0`** if unset (use one physical GPU). Override: `CUDA_VISIBLE_DEVICES=1 ./scripts/run_train.sh ...`.
+
 ```bash
 ./scripts/run_train.sh --dataset-dir /data/COCO --output-dir ./out
-CUDA_VISIBLE_DEVICES=0 ./scripts/run_finetune.sh --dataset-dir /data/custom --output-dir ./out
+CUDA_VISIBLE_DEVICES=1 ./scripts/run_finetune.sh --dataset-dir /data/custom --output-dir ./out
 ```
 
 ### Multi-GPU (single machine)
 
+`run_*_multigpu.sh` set **`CUDA_VISIBLE_DEVICES`** to **`0,1,...,NPROC-1`** when unset (default `NPROC=4` → `0,1,2,3`). Override with your own list, e.g. `CUDA_VISIBLE_DEVICES=4,5,6,7 NPROC=4 ./scripts/run_train_multigpu.sh ...`.
+
 ```bash
-# 4 GPUs (default NPROC=4); pick GPUs with CUDA_VISIBLE_DEVICES
-CUDA_VISIBLE_DEVICES=0,1,2,3 ./scripts/run_train_multigpu.sh --dataset-dir /data/COCO --output-dir ./out
+./scripts/run_train_multigpu.sh --dataset-dir /data/COCO --output-dir ./out
 
 NPROC=8 ./scripts/run_train_multigpu.sh --dataset-dir /data/COCO --output-dir ./out --batch-size 2
 

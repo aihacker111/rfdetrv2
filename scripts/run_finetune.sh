@@ -6,13 +6,17 @@
 #   CUDA_VISIBLE_DEVICES=1 ./scripts/run_finetune.sh --dataset-dir /data/custom --output-dir ./out
 #
 # Env (optional):
-#   CUDA_VISIBLE_DEVICES  e.g. 0 to use one GPU
+#   CUDA_VISIBLE_DEVICES  default: 0 (single GPU). Override as needed.
 #   DATASET_DIR, OUTPUT_DIR, COCO_WEIGHTS, PRETRAINED_ENCODER  see scripts/finetune.py
+#
+# Use bash or ./scripts/run_finetune.sh — not plain ``sh`` on dash-based systems.
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
+
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 exec python3 "${SCRIPT_DIR}/finetune.py" "$@"
