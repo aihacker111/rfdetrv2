@@ -6,6 +6,15 @@ Usage
 -----
   python scripts/inference.py --weights model.pth --image photo.jpg --save out.jpg
   python scripts/inference.py --weights model.pth --video clip.mp4 --output clip_det.mp4
+
+Class names are resolved **from the checkpoint** (no extra files required):
+
+  1. ``class_names`` stored in the .pth (saved during training / fine-tune)
+  2. ``args.class_names`` in the .pth
+  3. Otherwise inferred from the detection head size → ``class_0``, ``class_1``, …
+
+Optional overrides (only if you want to replace what is in the .pth):
+``--classes-file``, ``--coco-json``, ``--dataset-dir``.
 """
 from __future__ import annotations
 
@@ -17,13 +26,15 @@ from pathlib import Path
 import cv2
 import numpy as np
 import supervision as sv
+import torch
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from rfdetrv2 import RFDETRV2Base, RFDETRV2Large, RFDETRV2Nano, RFDETRV2Small
-from rfdetrv2.util.coco_classes import COCO_CLASSES
+from rfdetrv2.util.coco_classes import COCO_CLASSES, infer_classes_from_dataset_dir
+from rfdetrv2.util.coco_classes import ordered_class_names_from_coco_json
 from rfdetrv2.util.dinov3_pretrained import resolve_pretrained_encoder_path
 
 DEFAULT_PRETRAINED = os.environ.get("PRETRAINED_ENCODER")
@@ -91,6 +102,54 @@ def _merge_overlapping_detections(detections: sv.Detections, labels: list, box_e
     )
 
 
+def _list_to_name_dict(names: list[str] | tuple) -> dict[int, str]:
+    return {i + 1: str(n) for i, n in enumerate(names)}
+
+
+def _infer_foreground_class_count(state: dict) -> int | None:
+    """Foreground class count K from ``class_embed.bias`` (K+1 logits including background)."""
+    for key, tensor in state.items():
+        if not key.endswith("class_embed.bias") or not hasattr(tensor, "shape"):
+            continue
+        n = int(tensor.shape[0])
+        if n >= 2:
+            return n - 1
+    return None
+
+
+def _class_names_dict_from_checkpoint(weights_path: str) -> tuple[dict[int, str], str]:
+    """
+    Build ``{1..K: name}`` from checkpoint. Returns (mapping, source_tag) for logging.
+
+    source_tag: ``"checkpoint.class_names"``, ``"checkpoint.args"``, ``"head_generic"``, or
+    ``"none"`` (caller may fall back to COCO).
+    """
+    path = Path(weights_path)
+    if not path.is_file():
+        return {}, "none"
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+
+    raw = ckpt.get("class_names")
+    if isinstance(raw, (list, tuple)) and raw:
+        return _list_to_name_dict(raw), "checkpoint.class_names"
+
+    args_obj = ckpt.get("args")
+    if args_obj is not None:
+        cn = getattr(args_obj, "class_names", None)
+        if isinstance(cn, (list, tuple)) and cn:
+            return _list_to_name_dict(cn), "checkpoint.args"
+        if isinstance(cn, dict) and cn:
+            return {int(k): str(v) for k, v in cn.items()}, "checkpoint.args"
+
+    state = ckpt.get("model")
+    if isinstance(state, dict):
+        k = _infer_foreground_class_count(state)
+        if k is not None and k > 0:
+            return {i + 1: f"class_{i}" for i in range(k)}, "head_generic"
+
+    return {}, "none"
+
+
 def _load_model(args: argparse.Namespace):
     explicit = args.pretrained_encoder or DEFAULT_PRETRAINED
     pretrained = resolve_pretrained_encoder_path(
@@ -100,23 +159,61 @@ def _load_model(args: argparse.Namespace):
         weights_by_size=DINO_WEIGHTS_BY_SIZE,
     )
     cls = _MODELS[args.model_size]
-    return cls(
+    model = cls(
         pretrain_weights=args.weights,
         pretrained_encoder=pretrained,
         device=args.device,
     )
+    ckpt_names, src = _class_names_dict_from_checkpoint(args.weights)
+    if ckpt_names:
+        model._class_names = ckpt_names
+        if src == "head_generic":
+            print(
+                "[inference] No class names in checkpoint — using generic labels "
+                f"class_0..class_{len(ckpt_names) - 1} from detection head size.",
+                file=sys.stderr,
+            )
+    return model
+
+
+def _resolve_class_names(args: argparse.Namespace, model) -> dict[int, str]:
+    """Label map ``{1..K} -> name`` aligned with model indices (same as training)."""
+    if args.classes_file:
+        with open(args.classes_file, encoding="utf-8") as f:
+            names = [line.strip() for line in f if line.strip()]
+        if not names:
+            raise ValueError(f"No non-empty lines in --classes-file {args.classes_file!r}")
+        return {i + 1: n for i, n in enumerate(names)}
+    if args.coco_json:
+        names = ordered_class_names_from_coco_json(args.coco_json)
+        if not names:
+            raise ValueError(f"No categories in --coco-json {args.coco_json!r}")
+        return {i + 1: n for i, n in enumerate(names)}
+    if args.dataset_dir:
+        id_to_name = infer_classes_from_dataset_dir(args.dataset_dir)
+        if not id_to_name:
+            raise ValueError(
+                f"No COCO JSON with categories found under --dataset-dir {args.dataset_dir!r}"
+            )
+        ordered = [id_to_name[k] for k in sorted(id_to_name.keys())]
+        return {i + 1: n for i, n in enumerate(ordered)}
+    inner = getattr(model, "_class_names", None)
+    if inner:
+        return inner
+    print(
+        "[inference] Warning: could not read class names or head size from checkpoint; "
+        "using MS-COCO names (likely wrong for a custom fine-tuned model).",
+        file=sys.stderr,
+    )
+    return COCO_CLASSES
 
 
 def _run_image(args: argparse.Namespace) -> None:
     model = _load_model(args)
     detections = model.predict(args.image, threshold=args.threshold)
 
-    if args.classes_file:
-        with open(args.classes_file) as f:
-            names = [line.strip() for line in f if line.strip()]
-        class_names = {i + 1: n for i, n in enumerate(names)}
-    else:
-        class_names = model.class_names or COCO_CLASSES
+    class_names = _resolve_class_names(args, model)
+    coco_fb = class_names is COCO_CLASSES
 
     print(f"Detections: {len(detections)}")
     for i, (xyxy, conf, cls_id) in enumerate(
@@ -124,7 +221,7 @@ def _run_image(args: argparse.Namespace) -> None:
         start=1,
     ):
         cls_int = int(cls_id)
-        cls_name = _get_class_name(cls_int, class_names)
+        cls_name = _get_class_name(cls_int, class_names, use_coco_fallback=coco_fb)
         x1, y1, x2, y2 = [float(v) for v in xyxy]
         print(
             f"{i:03d} | class={cls_name} (id={cls_int}) | conf={float(conf):.4f} "
@@ -136,7 +233,7 @@ def _run_image(args: argparse.Namespace) -> None:
         if image_bgr is None:
             raise FileNotFoundError(f"Could not read image: {args.image}")
         labels = [
-            f"{_get_class_name(int(cid), class_names)} {float(conf):.2f}"
+            f"{_get_class_name(int(cid), class_names, use_coco_fallback=coco_fb)} {float(conf):.2f}"
             for conf, cid in zip(detections.confidence, detections.class_id)
         ]
         draw_detections, draw_labels = _merge_overlapping_detections(detections, labels)
@@ -158,7 +255,8 @@ def _run_image(args: argparse.Namespace) -> None:
 
 def _run_video(args: argparse.Namespace) -> None:
     model = _load_model(args)
-    class_names = model.class_names or COCO_CLASSES
+    class_names = _resolve_class_names(args, model)
+    coco_fb = class_names is COCO_CLASSES
 
     cap = cv2.VideoCapture(args.video)
     if not cap.isOpened():
@@ -195,7 +293,7 @@ def _run_video(args: argparse.Namespace) -> None:
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             detections = model.predict(frame_rgb, threshold=args.threshold)
             labels = [
-                f"{_get_class_name(int(cid), class_names)} {float(conf):.2f}"
+                f"{_get_class_name(int(cid), class_names, use_coco_fallback=coco_fb)} {float(conf):.2f}"
                 for conf, cid in zip(detections.confidence, detections.class_id)
             ]
             annotated = box_annotator.annotate(scene=frame_bgr.copy(), detections=detections)
@@ -238,7 +336,24 @@ def main() -> None:
     mode.add_argument("--video", type=str, help="Input video path")
 
     parser.add_argument("--save", type=str, default=None, help="[image] Annotated output path")
-    parser.add_argument("--classes-file", type=str, default=None, help="[image] One class name per line")
+    parser.add_argument(
+        "--classes-file",
+        type=str,
+        default=None,
+        help="Optional override: one class name per line (index 0 = first class).",
+    )
+    parser.add_argument(
+        "--coco-json",
+        type=str,
+        default=None,
+        help="Optional override: COCO JSON with categories (sorted by id = class order).",
+    )
+    parser.add_argument(
+        "--dataset-dir",
+        type=str,
+        default=None,
+        help="Optional override: dataset root to locate a COCO JSON for category names.",
+    )
     parser.add_argument("--output", type=str, default=None, help="[video] Output video path")
     parser.add_argument("--skip-frames", type=int, default=0, help="[video] Process every Nth frame (0=all)")
     parser.add_argument("--show", action="store_true", help="[video] Preview window (q to quit)")

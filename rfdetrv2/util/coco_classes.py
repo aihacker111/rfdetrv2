@@ -11,6 +11,18 @@ def load_classes_from_coco_json(json_path: str) -> Dict[int, str]:
     return {int(c["id"]): str(c["name"]) for c in data.get("categories", [])}
 
 
+def ordered_class_names_from_coco_json(json_path: str) -> list[str]:
+    """
+    Category names sorted by ascending ``category_id`` (same order as training /
+    ``label_to_cat_id``). Model class indices 0…K-1 align with this list order.
+    """
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    categories = data.get("categories") or []
+    categories = sorted(categories, key=lambda c: int(c["id"]))
+    return [str(c.get("name", "")) for c in categories]
+
+
 def infer_classes_from_dataset_dir(dataset_dir: str) -> Optional[Dict[int, str]]:
     """
     Auto-detect class names from a COCO-format dataset root.

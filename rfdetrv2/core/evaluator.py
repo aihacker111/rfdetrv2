@@ -278,20 +278,46 @@ def map_eval_labels_to_coco(results: List[dict], label_to_cat_id: Sequence[int])
 
     Required when the dataset uses non-contiguous category IDs (common in
     Roboflow and custom COCO datasets).
+
+    The detector head has ``K + 1`` logits (K foreground + background). PostProcess
+    can still surface top-k entries with label ``K``; those must not be indexed into
+    ``label_to_cat_id`` (length K). We drop foreground-invalid rows before mapping.
     """
     if not label_to_cat_id:
         return results
+    n = len(label_to_cat_id)
     out = []
     for res in results:
         if "labels" not in res:
             out.append(res)
             continue
         lbl = res["labels"]
+        fg = (lbl >= 0) & (lbl < n)
+        if not fg.any():
+            new_res = {
+                **res,
+                "labels": lbl[:0],
+                "scores": res["scores"][:0],
+                "boxes": res["boxes"][:0],
+            }
+            if "masks" in res:
+                new_res["masks"] = res["masks"][:0]
+            out.append(new_res)
+            continue
         mapped = torch.tensor(
-            [label_to_cat_id[int(x.item())] for x in lbl],
-            dtype=lbl.dtype, device=lbl.device,
+            [label_to_cat_id[int(x.item())] for x in lbl[fg]],
+            dtype=lbl.dtype,
+            device=lbl.device,
         )
-        out.append({**res, "labels": mapped})
+        new_res = {
+            **res,
+            "labels": mapped,
+            "scores": res["scores"][fg],
+            "boxes": res["boxes"][fg],
+        }
+        if "masks" in res:
+            new_res["masks"] = res["masks"][fg]
+        out.append(new_res)
     return out
 
 

@@ -507,4 +507,7 @@ def strip_checkpoint(checkpoint: str) -> None:
         'model': state_dict['model'],
         'args': state_dict['args'],
     }
+    for k in ("class_names", "label_to_cat_id"):
+        if k in state_dict:
+            new_state_dict[k] = state_dict[k]
     torch.save(new_state_dict, checkpoint)

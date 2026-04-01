@@ -229,11 +229,12 @@ class RFDETRV2:
                 if hasattr(self.model_config, "model_copy") \
                 else self.model_config.copy(update={"num_classes": num_classes})
 
+        updates: dict = {"class_names": class_names}
         if label_to_cat_id is not None:
-            if hasattr(train_config, "model_copy"):
-                return train_config.model_copy(update={"label_to_cat_id": label_to_cat_id})
-            return train_config.copy(update={"label_to_cat_id": label_to_cat_id})
-        return train_config
+            updates["label_to_cat_id"] = label_to_cat_id
+        if hasattr(train_config, "model_copy"):
+            return train_config.model_copy(update=updates)
+        return train_config.copy(update=updates)
 
     def _register_logging_callbacks(
         self,

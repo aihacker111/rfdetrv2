@@ -448,6 +448,16 @@ class TrainingPipeline(BasePipeline):
         }
         if self.ema_model is not None:
             weights["ema_model"] = self.ema_model.module.state_dict()
+        cn = getattr(args, "class_names", None)
+        if cn:
+            if isinstance(cn, (list, tuple)):
+                weights["class_names"] = list(cn)
+            elif isinstance(cn, dict):
+                keys = sorted(int(k) for k in cn.keys())
+                weights["class_names"] = [str(cn[k]) for k in keys]
+        lt = getattr(args, "label_to_cat_id", None)
+        if lt:
+            weights["label_to_cat_id"] = list(lt)
         return weights
 
     def _finalize(self, output_dir, best_map_5095, best_map_ema_5095, test_stats, ema_test_stats, args):
