@@ -94,6 +94,12 @@ class TrainingPipeline(BasePipeline):
         """
         self._validate_callbacks()
         args = self._build_args(train_config)
+        # Checkpoint ``args`` must match the built model / dataset (avoid stale e.g. num_classes=90).
+        args.num_classes = self.model_config.num_classes
+        if getattr(train_config, "class_names", None) is not None:
+            args.class_names = train_config.class_names
+        if getattr(train_config, "label_to_cat_id", None) is not None:
+            args.label_to_cat_id = list(train_config.label_to_cat_id)
 
         utils.init_distributed_mode(args)
         self._seed(args)

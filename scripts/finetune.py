@@ -5,9 +5,18 @@ RF-DETR v2 — fine-tune from COCO (or custom) RF-DETR weights on a new dataset.
 Resolves DINOv3 encoder + optional RF-DETR ``pretrain_weights`` (CLI or HuggingFace),
 then runs ``model.finetune()`` (two-phase encoder freeze supported).
 
+``num_classes``, ``class_names``, and ``label_to_cat_id`` are **inferred from the dataset**
+(see ``detr._prepare_class_info``); the training pipeline forces the same values into
+checkpoint ``args`` so ``scripts/inference.py`` can read them. Checkpoints also store
+top-level ``class_names`` / ``label_to_cat_id`` (see ``TrainingPipeline._build_weights_dict``).
+
+For inference after fine-tune, prefer ``<output_dir>/checkpoint_best_total.pth`` (not only
+rolling ``checkpoint.pth``) unless you know the file contains the resized head.
+
 Usage
 -----
   python scripts/finetune.py --dataset-dir /data/custom --output-dir ./out
+  python scripts/finetune.py ... --debug-data-limit 32   # smoke test, small subsets
 
 Env: DATASET_DIR, OUTPUT_DIR, COCO_WEIGHTS (RF-DETR .pth), RFDETR_SKIP_COCO_CHECKPOINT=1
 """
