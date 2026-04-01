@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 import cv2
@@ -111,35 +113,88 @@ def _list_to_name_dict(names: list[str] | tuple) -> dict[int, str]:
 
 
 def _infer_foreground_class_count(state: dict) -> int | None:
-    """Foreground class count K from ``class_embed.bias`` (K+1 logits including background)."""
+    """
+    Foreground class count K from detection-head Linear biases (K+1 logits incl. background).
+
+    LW-DETR duplicates the class head (``group_detr`` / ``enc_out_class_embed.*``); we take the
+    **most common** output size so one stray key cannot dominate.
+    """
+    n_outs: list[int] = []
     for key, tensor in state.items():
-        if not key.endswith("class_embed.bias") or not hasattr(tensor, "shape"):
+        if not isinstance(key, str) or not hasattr(tensor, "shape") or tensor.ndim < 1:
+            continue
+        if not (
+            key.endswith("class_embed.bias")
+            or re.search(r"enc_out_class_embed\.\d+\.bias$", key)
+        ):
             continue
         n = int(tensor.shape[0])
         if n >= 2:
-            return n - 1
+            n_outs.append(n)
+    if not n_outs:
+        return None
+    n_out, _ = Counter(n_outs).most_common(1)[0]
+    return n_out - 1
+
+
+def _resolve_model_state_dict(ckpt: dict) -> dict | None:
+    """Return the state dict that contains ``class_embed`` / detection head tensors."""
+    if not isinstance(ckpt, dict):
+        return None
+    for name in ("model", "ema_model", "model_ema", "state_dict"):
+        inner = ckpt.get(name)
+        if isinstance(inner, dict) and _infer_foreground_class_count(inner) is not None:
+            return inner
+    # File may be a bare ``torch.save(model.state_dict(), ...)`` (no ``model`` key).
+    tensor_map = {
+        k: v for k, v in ckpt.items() if isinstance(k, str) and isinstance(v, torch.Tensor)
+    }
+    if _infer_foreground_class_count(tensor_map) is not None:
+        return tensor_map
     return None
 
 
-def _num_foreground_classes_for_model_build(ckpt: dict) -> int | None:
+def _num_foreground_classes_for_model_build(ckpt: dict) -> tuple[int | None, str]:
     """
-    How many **foreground** classes the saved ``model`` was trained with.
-    Prefer the actual ``class_embed`` size; fall back to ``args`` / ``class_names``.
+    Foreground count K for ``ModelConfig(num_classes=K)``.
+
+    **Always prefer tensor shapes** over ``args.num_classes`` (metadata can stay 90 after
+    fine-tune if the checkpoint was produced oddly). Falls back to ``class_names`` length,
+    then ``args.num_classes``.
     """
-    state = ckpt.get("model")
-    if isinstance(state, dict):
+    state = _resolve_model_state_dict(ckpt)
+    if state is not None:
         k = _infer_foreground_class_count(state)
         if k is not None and k > 0:
-            return k
+            raw = ckpt.get("class_names")
+            if isinstance(raw, (list, tuple)) and raw and len(raw) != k:
+                print(
+                    f"[inference] Warning: detection head implies K={k} classes but "
+                    f"checkpoint.class_names has length {len(raw)}.",
+                    file=sys.stderr,
+                )
+            args_obj = ckpt.get("args")
+            if args_obj is not None:
+                nca = getattr(args_obj, "num_classes", None)
+                if nca is not None and int(nca) != k:
+                    print(
+                        f"[inference] Warning: args.num_classes={nca} but weights imply K={k}; "
+                        "using tensor shapes.",
+                        file=sys.stderr,
+                    )
+            return k, "checkpoint_weights"
+
+    raw = ckpt.get("class_names")
+    if isinstance(raw, (list, tuple)) and raw:
+        return len(raw), "checkpoint.class_names"
+
     args_obj = ckpt.get("args")
     if args_obj is not None:
         nc = getattr(args_obj, "num_classes", None)
         if nc is not None:
-            return int(nc)
-    raw = ckpt.get("class_names")
-    if isinstance(raw, (list, tuple)) and raw:
-        return len(raw)
-    return None
+            return int(nc), "checkpoint.args"
+
+    return None, "none"
 
 
 def _class_names_dict_from_checkpoint(
@@ -171,8 +226,8 @@ def _class_names_dict_from_checkpoint(
         if isinstance(cn, dict) and cn:
             return {int(k): str(v) for k, v in cn.items()}, "checkpoint.args"
 
-    state = ckpt.get("model")
-    if isinstance(state, dict):
+    state = _resolve_model_state_dict(ckpt)
+    if state is not None:
         k = _infer_foreground_class_count(state)
         if k is not None and k > 0:
             return {i + 1: f"class_{i}" for i in range(k)}, "head_generic"
@@ -195,11 +250,13 @@ def _load_model(args: argparse.Namespace):
     if path.is_file():
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
 
-    n_fg = getattr(args, "num_classes", None)
-    if n_fg is not None:
-        n_fg = int(n_fg)
+    n_fg: int | None = None
+    n_src = "default"
+    if getattr(args, "num_classes", None) is not None:
+        n_fg = int(args.num_classes)
+        n_src = "cli"
     elif isinstance(ckpt, dict):
-        n_fg = _num_foreground_classes_for_model_build(ckpt)
+        n_fg, n_src = _num_foreground_classes_for_model_build(ckpt)
 
     model_kw: dict = dict(
         pretrain_weights=args.weights,
@@ -210,10 +267,15 @@ def _load_model(args: argparse.Namespace):
         model_kw["num_classes"] = n_fg
         if args.num_classes is None:
             print(
-                f"[inference] Building model with num_classes={n_fg} "
-                "(from checkpoint; default 90 would mismatch a fine-tuned head).",
+                f"[inference] num_classes={n_fg} (source={n_src}).",
                 file=sys.stderr,
             )
+    elif args.num_classes is None:
+        print(
+            "[inference] Warning: could not infer num_classes from checkpoint; "
+            "using model default (often 90). Prefer checkpoint_best_total.pth or --num-classes 11.",
+            file=sys.stderr,
+        )
 
     model = cls(**model_kw)
 
