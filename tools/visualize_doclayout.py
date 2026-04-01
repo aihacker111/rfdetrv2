@@ -2,14 +2,24 @@
 DocLayNet COCO Dataset Visualizer
 ==================================
 Visualize images with bounding boxes and class labels from a COCO-format dataset.
+Each image is saved as its own file under save_dir.
 
 Usage
 -----
-    python visualize_dataset.py --data_dir /path/to/doclaynet --split train
-    python visualize_dataset.py --data_dir /path/to/doclaynet --split val --num_images 20
-    python visualize_dataset.py --data_dir /path/to/doclaynet --image_id 42
-    python visualize_dataset.py --data_dir /path/to/doclaynet --category "Text"
-    python visualize_dataset.py --data_dir /path/to/doclaynet --save_dir ./viz_output
+    # Save every image individually
+    python visualize_dataset.py --data_dir /path/to/doclaynet --split train --save_dir ./viz
+
+    # Random sample of N images
+    python visualize_dataset.py --data_dir /path/to/doclaynet --num_images 20 --save_dir ./viz
+
+    # Single image by ID
+    python visualize_dataset.py --data_dir /path/to/doclaynet --image_id 42 --save_dir ./viz
+
+    # Filter by category
+    python visualize_dataset.py --data_dir /path/to/doclaynet --category "Text" --save_dir ./viz
+
+    # Dataset-level statistics chart
+    python visualize_dataset.py --data_dir /path/to/doclaynet --stats --save_dir ./viz
 
 Expected layout
 ---------------
@@ -201,49 +211,51 @@ class DatasetVisualizer:
         self,
         image_ids: list = None,
         num_images: int = 9,
-        cols: int = 3,
-        figsize: tuple = (18, 18),
         show_labels: bool = True,
         save_dir: str = None,
     ):
         """
-        Display a grid of annotated images.
+        Save (or display) each annotated image as its own file.
 
         Args:
-            image_ids:   Specific IDs to show.  None = random sample.
-            num_images:  How many to show when image_ids is None.
-            cols:        Grid columns.
-            figsize:     Matplotlib figure size.
+            image_ids:   Specific IDs to process. None = random sample.
+            num_images:  How many images when image_ids is None.
             show_labels: Draw class name on each box.
-            save_dir:    If set, saves grid as PNG instead of displaying.
+            save_dir:    Directory to save individual PNGs. None = display interactively.
         """
         if image_ids is None:
             image_ids = random.sample(
                 self.loader.image_ids,
-                min(num_images, len(self.loader.image_ids))
+                min(num_images, len(self.loader.image_ids)),
             )
 
-        rows  = (len(image_ids) + cols - 1) // cols
-        fig, axes = plt.subplots(rows, cols, figsize=figsize)
-        axes = np.array(axes).reshape(-1) if rows * cols > 1 else [axes]
+        total = len(image_ids)
+        print(f"Processing {total} images...")
 
-        for ax, img_id in zip(axes, image_ids):
+        for i, img_id in enumerate(image_ids, 1):
             try:
-                canvas = self._render_image(img_id, show_labels)
+                canvas   = self._render_image(img_id, show_labels)
+                img_meta = self.loader.images[img_id]
+                # Use the original filename stem so the output is easy to trace back
+                stem = Path(img_meta["file_name"]).stem
+                filename = f"{stem}_id{img_id}.png"
+
+                fig, ax = plt.subplots(figsize=(12, 8))
                 ax.imshow(canvas)
-                ax.set_title(f"id={img_id}  ({len(self.loader.anns_by_image[img_id])} anns)",
-                             fontsize=8)
+                ax.axis("off")
+                ax.set_title(
+                    f"{img_meta['file_name']}  |  "
+                    f"{len(self.loader.anns_by_image[img_id])} annotations",
+                    fontsize=9,
+                )
+                fig.tight_layout()
+                self._save_or_show(fig, save_dir, filename)
+
+                if save_dir:
+                    print(f"  [{i}/{total}] saved → {filename}")
+
             except Exception as e:
-                ax.set_title(f"id={img_id} ERROR\n{e}", fontsize=7, color="red")
-            ax.axis("off")
-
-        # Hide unused axes
-        for ax in axes[len(image_ids):]:
-            ax.axis("off")
-
-        fig.suptitle(f"Dataset sample  —  {len(image_ids)} images", fontsize=12, y=1.01)
-        fig.tight_layout()
-        self._save_or_show(fig, save_dir, "grid.png")
+                print(f"  [{i}/{total}] ERROR image_id={img_id}: {e}")
 
     def show_single(
         self,
@@ -308,21 +320,23 @@ class DatasetVisualizer:
             ax_stat.set_title("Class distribution", fontsize=9)
             ax_stat.tick_params(labelsize=8)
 
+        img_meta = self.loader.images[image_id]
+        stem = Path(img_meta["file_name"]).stem
+        filename = f"{stem}_id{image_id}.png"
         fig.tight_layout()
-        self._save_or_show(fig, save_dir, f"image_{image_id}.png")
+        self._save_or_show(fig, save_dir, filename)
 
     def show_category(
         self,
         category_name: str,
         num_images: int = 9,
-        cols: int = 3,
         save_dir: str = None,
     ):
-        """Show a grid of images that contain a specific category."""
+        """Show / save individual images that contain a specific category."""
         ids = self.loader.get_by_category(category_name)
         print(f"Found {len(ids)} images with category '{category_name}'.")
         sample = random.sample(ids, min(num_images, len(ids)))
-        self.show(image_ids=sample, cols=cols, save_dir=save_dir)
+        self.show(image_ids=sample, save_dir=save_dir)
 
     def dataset_stats(self, save_dir: str = None):
         """Plot dataset-level statistics: class distribution + annotations per image."""
@@ -399,12 +413,11 @@ def main():
     )
     p.add_argument("--data_dir",    required=True,  help="Dataset root directory.")
     p.add_argument("--split",       default="train", help="Split name (train / val / test).")
-    p.add_argument("--num_images",  type=int, default=9,  help="Number of images to show in grid.")
-    p.add_argument("--cols",        type=int, default=3,  help="Grid columns.")
-    p.add_argument("--image_id",    type=int, default=None, help="Show a single image by ID.")
-    p.add_argument("--category",    default=None, help="Filter grid to a specific category name.")
+    p.add_argument("--num_images",  type=int, default=9,  help="Number of images to process.")
+    p.add_argument("--image_id",    type=int, default=None, help="Process a single image by ID.")
+    p.add_argument("--category",    default=None, help="Filter to a specific category name.")
     p.add_argument("--stats",       action="store_true", help="Show dataset-level statistics.")
-    p.add_argument("--save_dir",    default=None, help="Save images here instead of displaying.")
+    p.add_argument("--save_dir",    default=None, help="Directory to save individual output images.")
     p.add_argument("--no_labels",   action="store_true", help="Hide class labels on boxes.")
     args = p.parse_args()
 
@@ -417,12 +430,12 @@ def main():
         viz.show_single(args.image_id, save_dir=args.save_dir)
 
     elif args.category:
-        viz.show_category(args.category, num_images=args.num_images,
-                          cols=args.cols, save_dir=args.save_dir)
+        viz.show_category(args.category, num_images=args.num_images, save_dir=args.save_dir)
 
     else:
-        viz.show(num_images=args.num_images, cols=args.cols,
-                 show_labels=not args.no_labels, save_dir=args.save_dir)
+        viz.show(num_images=args.num_images,
+                 show_labels=not args.no_labels,
+                 save_dir=args.save_dir)
 
 
 if __name__ == "__main__":
