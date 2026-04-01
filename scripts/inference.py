@@ -6,8 +6,8 @@ RF-DETR v2 — inference on a single image or video.
 
   * **K** (foreground classes): detection-head tensor shapes, else ``len(class_names)``,
     else ``args.num_classes``.
-  * **Names**: top-level ``class_names`` list, else ``args.class_names`` (list or dict),
-    else ``class_0`` … ``class_{K-1}``.
+  * **Names**: top-level ``class_names`` (list or dict ``{1: "Caption", …}``), else
+    ``args.class_names`` (list or dict), else ``class_0`` … for missing keys.
 
 Usage
 -----
@@ -88,6 +88,8 @@ def _resolve_state_dict(ckpt: dict) -> dict | None:
 def _names_from_checkpoint(ckpt: dict) -> dict[int, str]:
     """Build ``{1: name, …}`` from checkpoint metadata only (may be empty)."""
     raw = ckpt.get("class_names")
+    if isinstance(raw, dict) and raw:
+        return {int(k): str(v) for k, v in raw.items()}
     if isinstance(raw, (list, tuple)) and raw:
         return {i + 1: str(n) for i, n in enumerate(raw)}
     a = ckpt.get("args")
@@ -101,16 +103,22 @@ def _names_from_checkpoint(ckpt: dict) -> dict[int, str]:
     return {}
 
 
-def _parse_checkpoint_meta(ckpt: dict) -> tuple[int, dict[int, str]]:
+def _parse_checkpoint_meta(ckpt: dict) -> tuple[int, dict[int, str], int]:
     """
     Return ``(K, {1..K: name})`` using only checkpoint contents.
 
-    K priority: weights → len(names) → ``args.num_classes``.
+    **K** (architecture, must match saved tensors): weights first, else name list length,
+    else ``args.num_classes``.
+
+    **Labels**: use every name stored in the checkpoint for keys ``1 .. len(names)``; any
+    missing key up to ``K`` gets ``class_{j}`` (0-based index). This covers the common
+    case where metadata lists 11 DocLayNet classes but the file still has a 90-class
+    COCO head — your 11 names are kept for logits ``0..10``.
     """
     state = _resolve_state_dict(ckpt)
     k_w = _infer_k_from_state(state) if state else None
-    names = _names_from_checkpoint(ckpt)
-    k_n = len(names) if names else None
+    raw = _names_from_checkpoint(ckpt)
+    k_n = len(raw) if raw else None
     a = ckpt.get("args")
     k_a = None
     if a is not None and getattr(a, "num_classes", None) is not None:
@@ -129,17 +137,24 @@ def _parse_checkpoint_meta(ckpt: dict) -> tuple[int, dict[int, str]]:
             "Re-save with a recent train/finetune run, or use checkpoint_best_total.pth."
         )
 
-    if names and len(names) != k:
+    if k_w and k_n and k_n != k_w:
         print(
-            f"[inference] Warning: checkpoint names count ({len(names)}) != K={k}; "
-            "using generic class_0.. labels.",
+            f"[inference] Warning: weights imply K={k_w} classes but checkpoint lists "
+            f"{k_n} name(s) (e.g. fine-tune metadata + COCO-sized head). "
+            f"Using K={k} for loading; showing stored names for classes 1..{k_n}, "
+            "generic labels for the rest. Re-fine-tune so the head matches your dataset.",
             file=sys.stderr,
         )
-        names = {}
-    if not names or len(names) != k:
-        names = {i + 1: f"class_{i}" for i in range(k)}
 
-    return k, names
+    names: dict[int, str] = {}
+    for i in range(1, k + 1):
+        if i in raw:
+            names[i] = raw[i]
+        else:
+            names[i] = f"class_{i - 1}"
+
+    n_meta = len(raw) if raw else 0
+    return k, names, n_meta
 
 
 def _label_name(cls_id: int, class_names: dict[int, str]) -> str:
@@ -193,8 +208,18 @@ def _load_model(weights: str, model_size: str, device: str, pretrained_encoder: 
     if not isinstance(ckpt, dict):
         raise SystemExit("Checkpoint must be a dict (.pth with model/args or training format).")
 
-    k, class_names = _parse_checkpoint_meta(ckpt)
-    print(f"[inference] num_classes={k} (from checkpoint); {len(class_names)} label(s).", file=sys.stderr)
+    k, class_names, n_meta = _parse_checkpoint_meta(ckpt)
+    if n_meta and n_meta < k:
+        print(
+            f"[inference] num_classes={k} (from checkpoint head); "
+            f"{n_meta} name(s) from metadata, {k - n_meta} generic (class indices {n_meta}..{k - 1}).",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"[inference] num_classes={k} (from checkpoint); {len(class_names)} label(s).",
+            file=sys.stderr,
+        )
 
     enc = pretrained_encoder or DEFAULT_PRETRAINED
     pretrained = resolve_pretrained_encoder_path(
