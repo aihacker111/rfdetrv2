@@ -2,39 +2,28 @@
 
 Object detection built on RF-DETR with DINOv3 backbones, supervised training, and optional prototype alignment.
 
-## Layout
+## Scripts (`scripts/`)
 
-See **[docs/REPO_LAYOUT.md](docs/REPO_LAYOUT.md)** and **[scripts/README.md](scripts/README.md)** for folders, CLIs, and conventions.
+There are three entry points:
 
-## Quick start (supervised training)
+| Script | Purpose |
+|--------|---------|
+| `scripts/train.py` | Supervised training (`model.train()`). |
+| `scripts/finetune.py` | Fine-tuning from RF-DETR COCO weights (`model.finetune()`). |
+| `scripts/inference.py` | Image (`--image`) or video (`--video`) inference. |
 
-From the repository root:
-
-```bash
-# Multi-GPU (edit env vars in the script as needed)
-./run_train_supervised.sh
-# or
-./scripts/run_train_supervised.sh
-```
+Examples:
 
 ```bash
-python scripts/train_supervised.py --help
-# equivalent:
-python train_supervised.py --help
+python scripts/train.py --dataset-dir /path/to/COCO --output-dir ./out --dataset-file coco
+python scripts/finetune.py --dataset-dir /path/to/data --output-dir ./out --freeze-encoder --unfreeze-at-epoch 5
+python scripts/inference.py --weights checkpoint.pth --image photo.jpg --save out.jpg
+python scripts/inference.py --weights checkpoint.pth --video clip.mp4 --output clip_det.mp4
 ```
 
-Weights resolve under `dinov3_pretrained/` or download automatically; DINOv3 hub source is ensured under `dinov3/` when needed.
+Weights resolve under `dinov3_pretrained/` / `rfdetr_pretrained/` or download when configured.
 
-## Other tools (inference, eval, viz)
-
-All live under **`scripts/`**; the same filenames at the repo root forward to them, e.g.:
-
-```bash
-python scripts/inference.py --help
-python inference.py --help    # same
-python scripts/evaluate.py --weights ... --dataset-dir ...
-python scripts/count_model_params.py
-```
+Env shortcuts: `DATASET_DIR`, `OUTPUT_DIR`, `PRETRAINED_ENCODER`, `COCO_WEIGHTS` (finetune).
 
 ## Tests
 
@@ -45,4 +34,4 @@ pytest
 
 ## Requirements
 
-Install project dependencies for `rfdetrv2` (PyTorch, supervision, etc.) per your environment; `dinov3/requirements.txt` covers the vendored hub tree if you develop inside `dinov3/`.
+Install PyTorch, `supervision` (inference), and other deps for `rfdetrv2` for your environment.

@@ -13,6 +13,13 @@ from pydantic import BaseModel, field_validator
 
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
+
+def pydantic_dump(model: BaseModel) -> dict:
+    """Serialize a Pydantic v1/v2 model to a plain dict."""
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
+
 class ModelConfig(BaseModel):
     encoder: Literal["dinov3_nano", "dinov3_small", "dinov3_base", "dinov3_large"]
     out_feature_indexes: List[int]
@@ -65,7 +72,7 @@ class ModelConfig(BaseModel):
         return os.path.realpath(os.path.expanduser(v))
 
 
-class RFDETRNanoConfig(ModelConfig):
+class RFDETRV2NanoConfig(ModelConfig):
     """
     RF-DETR Nano: DINOv3 ViT-S (dinov3_vits16, 21M, MLP FFN).
     12 blocks, same out_feature_indexes as Small.
@@ -88,7 +95,7 @@ class RFDETRNanoConfig(ModelConfig):
     use_windowed_attn: bool = False
 
 
-class RFDETRBaseConfig(ModelConfig):
+class RFDETRV2BaseConfig(ModelConfig):
     """
     The configuration for an RF-DETR Base model.
     """
@@ -110,7 +117,7 @@ class RFDETRBaseConfig(ModelConfig):
     positional_encoding_size: int = 35
     use_windowed_attn: bool = False
 
-class RFDETRSmallConfig(ModelConfig):
+class RFDETRV2SmallConfig(ModelConfig):
     """
     The configuration for an RF-DETR Small model.
     DINOv3 ViT-S+ (dinov3_vits16plus) has 12 blocks (indices 0-11).
@@ -152,7 +159,7 @@ class RFDETRSmallConfig(ModelConfig):
 #     use_windowed_attn: bool = False
 
 
-class RFDETRLargeConfig(ModelConfig):
+class RFDETRV2LargeConfig(ModelConfig):
     """
     The configuration for an RF-DETR Base model.
     """
@@ -231,6 +238,8 @@ class TrainConfig(BaseModel):
     segmentation_head: bool = False
     eval_max_dets: int = 500
     freeze_encoder: bool = False  # Freeze DINOv3 backbone (no gradient update)
+    # Remap model class indices → COCO category_id for eval (Roboflow / custom COCO)
+    label_to_cat_id: Optional[List[int]] = None
 
     @field_validator("dataset_dir", "output_dir", "coco_path", mode="after")
     @classmethod
@@ -244,9 +253,23 @@ class TrainConfig(BaseModel):
         return os.path.realpath(os.path.expanduser(v))
 
 
+class FineTuneConfig(TrainConfig):
+    """Fine-tuning hyper-parameters (two-phase encoder freeze + optional LoRA)."""
+
+    unfreeze_at_epoch: Optional[int] = None
+    backbone_lora: bool = False
+
+
 class SegmentationTrainConfig(TrainConfig):
     mask_point_sample_ratio: int = 16
     mask_ce_loss_coef: float = 5.0
     mask_dice_loss_coef: float = 5.0
     cls_loss_coef: float = 5.0
     segmentation_head: bool = True
+
+
+# Backward-compatible aliases (prefer RFDETRV2*Config)
+RFDETRNanoConfig = RFDETRV2NanoConfig
+RFDETRBaseConfig = RFDETRV2BaseConfig
+RFDETRSmallConfig = RFDETRV2SmallConfig
+RFDETRLargeConfig = RFDETRV2LargeConfig

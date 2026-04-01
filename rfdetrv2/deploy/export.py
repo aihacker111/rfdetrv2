@@ -22,10 +22,10 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
-import rfdetr.datasets.transforms as T
-import rfdetr.util.misc as utils
-from rfdetr.deploy._onnx import OnnxOptimizer
-from rfdetr.models import build_model
+import rfdetrv2.datasets.transforms as T
+import rfdetrv2.util.misc as utils
+from rfdetrv2.deploy._onnx import OnnxOptimizer
+from rfdetrv2.models import build_model
 
 
 def run_command_shell(command, dry_run:bool = False) -> int:

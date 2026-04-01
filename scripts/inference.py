@@ -1,61 +1,63 @@
-from pathlib import Path
+#!/usr/bin/env python3
+"""
+RF-DETR v2 — inference on a single image or a video.
+
+Usage
+-----
+  python scripts/inference.py --weights model.pth --image photo.jpg --save out.jpg
+  python scripts/inference.py --weights model.pth --video clip.mp4 --output clip_det.mp4
+"""
+from __future__ import annotations
+
 import argparse
 import os
 import sys
+from pathlib import Path
 
 import cv2
 import numpy as np
 import supervision as sv
 
-project_root = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(project_root))
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
-from rfdetrv2 import RFDETRBase, RFDETRLarge, RFDETRNano, RFDETRSmall
+from rfdetrv2 import RFDETRV2Base, RFDETRV2Large, RFDETRV2Nano, RFDETRV2Small
+from rfdetrv2.util.coco_classes import COCO_CLASSES
 from rfdetrv2.util.dinov3_pretrained import resolve_pretrained_encoder_path
 
-# DINOv3 pretrained weights — used when building model (checkpoint may override)
+DEFAULT_PRETRAINED = os.environ.get("PRETRAINED_ENCODER")
+
 DINO_WEIGHTS_BY_SIZE = {
     "nano": "dinov3_vits16_pretrain_lvd1689m-08c60483.pth",
     "small": "dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth",
     "base": "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
     "large": "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
 }
-DEFAULT_PRETRAINED = os.environ.get("PRETRAINED_ENCODER")
-from rfdetrv2.util.coco_classes import COCO_CLASSES
+
+_MODELS = {
+    "nano": RFDETRV2Nano,
+    "small": RFDETRV2Small,
+    "base": RFDETRV2Base,
+    "large": RFDETRV2Large,
+}
 
 
 def _get_class_name(cls_id: int, class_names: dict, use_coco_fallback: bool = True) -> str:
-    """Resolve a human-readable class name from a raw model class id.
-
-    model.class_names can be in three formats:
-      A) {0: "person", 1: "bicycle", ...}  — 0-indexed string values  → use directly
-      B) {1: "person", 2: "bicycle", ...}  — 1-indexed string values  → use directly
-      C) {0: 1, 1: 2, 17: 18, 18: 19, ...} — int remapping dict       → IGNORE,
-         fall through to COCO_CLASSES with the raw id instead
-
-    For format C (RF-DETR default), the raw id IS already the correct COCO 1-indexed key:
-      raw=18 → COCO_CLASSES[18] = "dog"  ✓
-    """
     raw = int(cls_id)
-
-    # Only trust class_names values when they are actual name strings
     for key in (raw, raw + 1):
         val = class_names.get(key)
         if isinstance(val, str):
             return val
-
-    # class_names has int values (remapping dict) or no match — use COCO directly
     if use_coco_fallback:
         if raw in COCO_CLASSES:
-            return COCO_CLASSES[raw]        # e.g. 18 → "dog"
+            return COCO_CLASSES[raw]
         if (raw + 1) in COCO_CLASSES:
             return COCO_CLASSES[raw + 1]
-
     return str(raw)
 
 
 def _merge_overlapping_detections(detections: sv.Detections, labels: list, box_eps: float = 2.0):
-    """Merge detections with identical boxes so both labels are visible (stacked)."""
     if len(detections) == 0:
         return detections, labels
     xyxy = np.asarray(detections.xyxy)
@@ -89,68 +91,32 @@ def _merge_overlapping_detections(detections: sv.Detections, labels: list, box_e
     )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Run RF-DETRV2 inference on one image.")
-    parser.add_argument("--weights", type=str, required=True, help="Path to trained checkpoint (.pth).")
-    parser.add_argument(
-        "--model-size",
-        type=str,
-        choices=["nano", "small", "base", "large"],
-        default="base",
-        help="Model size: nano (21M), small (29M), base, large.",
-    )
-    parser.add_argument(
-        "--pretrained-encoder",
-        type=str,
-        default=DEFAULT_PRETRAINED,
-        help="Path to DINOv3 .pth. If unset, uses dinov3_pretrained/ or project root, or downloads official weights.",
-    )
-    parser.add_argument("--image", type=str, required=True, help="Path to input image.")
-    parser.add_argument("--threshold", type=float, default=0.35, help="Confidence threshold.")
-    parser.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu", "mps"])
-    parser.add_argument("--save", type=str, default=None, help="Optional output image path with drawn boxes.")
-    parser.add_argument(
-        "--classes-file",
-        type=str,
-        default=None,
-        help="Optional text file with one class name per line (overrides checkpoint).",
-    )
-    args = parser.parse_args()
-
-    # Resolve pretrained encoder: CLI > env > dinov3_pretrained/<model>.pth | project_root | auto-download
+def _load_model(args: argparse.Namespace):
     explicit = args.pretrained_encoder or DEFAULT_PRETRAINED
     pretrained = resolve_pretrained_encoder_path(
-        project_root,
+        _PROJECT_ROOT,
         args.model_size,
         explicit=explicit if explicit else None,
         weights_by_size=DINO_WEIGHTS_BY_SIZE,
     )
-
-    model_cls = {
-        "nano": RFDETRNano,
-        "small": RFDETRSmall,
-        "base": RFDETRBase,
-        "large": RFDETRLarge,
-    }[args.model_size]
-    model = model_cls(
+    cls = _MODELS[args.model_size]
+    return cls(
         pretrain_weights=args.weights,
         pretrained_encoder=pretrained,
         device=args.device,
     )
+
+
+def _run_image(args: argparse.Namespace) -> None:
+    model = _load_model(args)
     detections = model.predict(args.image, threshold=args.threshold)
-    print(model.class_names)
+
     if args.classes_file:
         with open(args.classes_file) as f:
             names = [line.strip() for line in f if line.strip()]
         class_names = {i + 1: n for i, n in enumerate(names)}
     else:
         class_names = model.class_names or COCO_CLASSES
-
-    # Debug: show class_names format so mapping issues are visible
-    if class_names and class_names is not COCO_CLASSES:
-        sample = dict(list(class_names.items())[:3])
-        val_types = {type(v).__name__ for v in list(class_names.values())[:5]}
-        print(f"[debug] model.class_names sample={sample} value_types={val_types}")
 
     print(f"Detections: {len(detections)}")
     for i, (xyxy, conf, cls_id) in enumerate(
@@ -165,17 +131,15 @@ def main() -> None:
             f"| box=[{x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f}]"
         )
 
-    if args.save is not None:
+    if args.save:
         image_bgr = cv2.imread(args.image)
         if image_bgr is None:
-            raise FileNotFoundError(f"Could not read input image: {args.image}")
-
+            raise FileNotFoundError(f"Could not read image: {args.image}")
         labels = [
             f"{_get_class_name(int(cid), class_names)} {float(conf):.2f}"
             for conf, cid in zip(detections.confidence, detections.class_id)
         ]
         draw_detections, draw_labels = _merge_overlapping_detections(detections, labels)
-
         box_annotator = sv.BoxAnnotator()
         label_annotator = sv.LabelAnnotator(
             text_scale=0.35,
@@ -183,12 +147,108 @@ def main() -> None:
             text_padding=2,
         )
         annotated = box_annotator.annotate(scene=image_bgr.copy(), detections=draw_detections)
-        annotated = label_annotator.annotate(scene=annotated, detections=draw_detections, labels=draw_labels)
+        annotated = label_annotator.annotate(
+            scene=annotated, detections=draw_detections, labels=draw_labels
+        )
+        out = Path(args.save)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(out), annotated)
+        print(f"Saved: {out}")
 
-        output_path = Path(args.save)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(output_path), annotated)
-        print(f"Saved annotated image to: {output_path}")
+
+def _run_video(args: argparse.Namespace) -> None:
+    model = _load_model(args)
+    class_names = model.class_names or COCO_CLASSES
+
+    cap = cv2.VideoCapture(args.video)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {args.video}")
+
+    fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    out_path = args.output or str(
+        Path(args.video).parent / (Path(args.video).stem + "_det.mp4")
+    )
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
+
+    box_annotator = sv.BoxAnnotator()
+    label_annotator = sv.LabelAnnotator()
+
+    frame_idx = 0
+    skip = max(1, args.skip_frames) if args.skip_frames else 1
+
+    try:
+        while True:
+            ret, frame_bgr = cap.read()
+            if not ret:
+                break
+
+            if frame_idx % skip != 0:
+                writer.write(frame_bgr)
+                frame_idx += 1
+                continue
+
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            detections = model.predict(frame_rgb, threshold=args.threshold)
+            labels = [
+                f"{_get_class_name(int(cid), class_names)} {float(conf):.2f}"
+                for conf, cid in zip(detections.confidence, detections.class_id)
+            ]
+            annotated = box_annotator.annotate(scene=frame_bgr.copy(), detections=detections)
+            annotated = label_annotator.annotate(
+                scene=annotated, detections=detections, labels=labels
+            )
+            writer.write(annotated)
+
+            if args.show:
+                cv2.imshow("RF-DETR", annotated)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+
+            frame_idx += 1
+            if frame_idx % 100 == 0:
+                print(f"Processed {frame_idx}/{total_frames} frames")
+    finally:
+        cap.release()
+        writer.release()
+        if args.show:
+            cv2.destroyAllWindows()
+
+    print(f"Saved output to {out_path}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="RF-DETR v2 image or video inference.")
+    parser.add_argument("--weights", type=str, required=True, help="Checkpoint .pth")
+    parser.add_argument(
+        "--model-size",
+        choices=list(_MODELS.keys()),
+        default="base",
+    )
+    parser.add_argument("--pretrained-encoder", type=str, default=DEFAULT_PRETRAINED)
+    parser.add_argument("--device", default="cuda", choices=["cuda", "cpu", "mps"])
+    parser.add_argument("--threshold", type=float, default=0.35)
+
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--image", type=str, help="Single image path")
+    mode.add_argument("--video", type=str, help="Input video path")
+
+    parser.add_argument("--save", type=str, default=None, help="[image] Annotated output path")
+    parser.add_argument("--classes-file", type=str, default=None, help="[image] One class name per line")
+    parser.add_argument("--output", type=str, default=None, help="[video] Output video path")
+    parser.add_argument("--skip-frames", type=int, default=0, help="[video] Process every Nth frame (0=all)")
+    parser.add_argument("--show", action="store_true", help="[video] Preview window (q to quit)")
+
+    args = parser.parse_args()
+
+    if args.image:
+        _run_image(args)
+    else:
+        _run_video(args)
 
 
 if __name__ == "__main__":

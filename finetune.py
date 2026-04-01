@@ -14,7 +14,7 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent
 sys.path.insert(0, str(project_root))
 
-from rfdetrv2 import RFDETRBase, RFDETRLarge, RFDETRNano, RFDETRSmall
+from rfdetrv2 import RFDETRV2Base, RFDETRV2Large, RFDETRV2Nano, RFDETRV2Small
 from rfdetrv2.util.dinov3_pretrained import resolve_pretrained_encoder_path
 from rfdetrv2.util.rfdetr_pretrained import resolve_rfdetr_coco_checkpoint
 
@@ -87,8 +87,8 @@ def main():
         weights_by_size=DINO_WEIGHTS_BY_SIZE,
     )
 
-    model_cls = {"nano": RFDETRNano, "small": RFDETRSmall,
-                 "base": RFDETRBase, "large": RFDETRLarge}[MODEL_SIZE]
+    model_cls = {"nano": RFDETRV2Nano, "small": RFDETRV2Small,
+                 "base": RFDETRV2Base, "large": RFDETRV2Large}[MODEL_SIZE]
 
     # Full RF-DETR checkpoint (COCO) — ``pretrain_weights`` uses ``Model`` loader (head resize, etc.).
     coco_ckpt = resolve_rfdetr_coco_checkpoint(
