@@ -7,14 +7,18 @@ Usage
   python scripts/inference.py --weights model.pth --image photo.jpg --save out.jpg
   python scripts/inference.py --weights model.pth --video clip.mp4 --output clip_det.mp4
 
-Class names are resolved **from the checkpoint** (no extra files required):
+**Number of classes:** the script reads your fine-tuned head from the .pth
+(``class_embed.bias`` length or ``args.num_classes``) and passes ``num_classes=…``
+into the model so it matches the checkpoint. Without this, the default is 90 (COCO)
+and weights may not load into the head — you would see generic ``class_0..class_89``.
 
-  1. ``class_names`` stored in the .pth (saved during training / fine-tune)
+**Class names** (no extra files required when the .pth embeds them):
+
+  1. ``class_names`` in the .pth
   2. ``args.class_names`` in the .pth
-  3. Otherwise inferred from the detection head size → ``class_0``, ``class_1``, …
+  3. Else generic ``class_0`` … from head size
 
-Optional overrides (only if you want to replace what is in the .pth):
-``--classes-file``, ``--coco-json``, ``--dataset-dir``.
+Optional: ``--num-classes``, ``--classes-file``, ``--coco-json``, ``--dataset-dir``.
 """
 from __future__ import annotations
 
@@ -117,17 +121,43 @@ def _infer_foreground_class_count(state: dict) -> int | None:
     return None
 
 
-def _class_names_dict_from_checkpoint(weights_path: str) -> tuple[dict[int, str], str]:
+def _num_foreground_classes_for_model_build(ckpt: dict) -> int | None:
+    """
+    How many **foreground** classes the saved ``model`` was trained with.
+    Prefer the actual ``class_embed`` size; fall back to ``args`` / ``class_names``.
+    """
+    state = ckpt.get("model")
+    if isinstance(state, dict):
+        k = _infer_foreground_class_count(state)
+        if k is not None and k > 0:
+            return k
+    args_obj = ckpt.get("args")
+    if args_obj is not None:
+        nc = getattr(args_obj, "num_classes", None)
+        if nc is not None:
+            return int(nc)
+    raw = ckpt.get("class_names")
+    if isinstance(raw, (list, tuple)) and raw:
+        return len(raw)
+    return None
+
+
+def _class_names_dict_from_checkpoint(
+    weights_path: str,
+    *,
+    ckpt: dict | None = None,
+) -> tuple[dict[int, str], str]:
     """
     Build ``{1..K: name}`` from checkpoint. Returns (mapping, source_tag) for logging.
 
     source_tag: ``"checkpoint.class_names"``, ``"checkpoint.args"``, ``"head_generic"``, or
     ``"none"`` (caller may fall back to COCO).
     """
-    path = Path(weights_path)
-    if not path.is_file():
-        return {}, "none"
-    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    if ckpt is None:
+        path = Path(weights_path)
+        if not path.is_file():
+            return {}, "none"
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
 
     raw = ckpt.get("class_names")
     if isinstance(raw, (list, tuple)) and raw:
@@ -159,12 +189,39 @@ def _load_model(args: argparse.Namespace):
         weights_by_size=DINO_WEIGHTS_BY_SIZE,
     )
     cls = _MODELS[args.model_size]
-    model = cls(
+
+    path = Path(args.weights)
+    ckpt: dict | None = None
+    if path.is_file():
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+
+    n_fg = getattr(args, "num_classes", None)
+    if n_fg is not None:
+        n_fg = int(n_fg)
+    elif isinstance(ckpt, dict):
+        n_fg = _num_foreground_classes_for_model_build(ckpt)
+
+    model_kw: dict = dict(
         pretrain_weights=args.weights,
         pretrained_encoder=pretrained,
         device=args.device,
     )
-    ckpt_names, src = _class_names_dict_from_checkpoint(args.weights)
+    if n_fg is not None:
+        model_kw["num_classes"] = n_fg
+        if args.num_classes is None:
+            print(
+                f"[inference] Building model with num_classes={n_fg} "
+                "(from checkpoint; default 90 would mismatch a fine-tuned head).",
+                file=sys.stderr,
+            )
+
+    model = cls(**model_kw)
+
+    ckpt_names, src = (
+        _class_names_dict_from_checkpoint(args.weights, ckpt=ckpt)
+        if isinstance(ckpt, dict)
+        else _class_names_dict_from_checkpoint(args.weights)
+    )
     if ckpt_names:
         model._class_names = ckpt_names
         if src == "head_generic":
@@ -330,6 +387,12 @@ def main() -> None:
     parser.add_argument("--pretrained-encoder", type=str, default=DEFAULT_PRETRAINED)
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu", "mps"])
     parser.add_argument("--threshold", type=float, default=0.35)
+    parser.add_argument(
+        "--num-classes",
+        type=int,
+        default=None,
+        help="Override foreground class count K (default: read from checkpoint).",
+    )
 
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--image", type=str, help="Single image path")
