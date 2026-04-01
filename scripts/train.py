@@ -68,6 +68,13 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--num-workers", type=int, default=8)
     run.add_argument("--epochs", type=int, default=50)
     run.add_argument("--grad-accum-steps", type=int, default=4)
+    run.add_argument(
+        "--debug-data-limit",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Use at most N images per train/val/test split (0 = full dataset). For quick pipeline checks.",
+    )
     run.add_argument("--run-test", action="store_true")
     run.add_argument("--tensorboard", action="store_true", default=True)
     run.add_argument("--no-tensorboard", action="store_false", dest="tensorboard")
@@ -159,7 +166,7 @@ def main() -> None:
         run_test=args.run_test,
         device=args.device,
         output_dir=args.output_dir,
-        debug_data_limit=0,
+        debug_data_limit=args.debug_data_limit,
         amp=args.amp,
         tensorboard=args.tensorboard,
         warmup_epochs=1,

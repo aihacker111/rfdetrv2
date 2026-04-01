@@ -343,6 +343,22 @@ class TrainingPipeline(BasePipeline):
         image_set_test = "test" if args.dataset_file == "roboflow" else "val"
         dataset_test = build_dataset(image_set_test, args, args.resolution)
 
+        debug_limit = int(getattr(args, "debug_data_limit", 0) or 0)
+        if debug_limit > 0:
+            train_n = min(debug_limit, len(dataset_train))
+            val_n = min(debug_limit, len(dataset_val))
+            test_n = min(debug_limit, len(dataset_test))
+            dataset_train = torch.utils.data.Subset(dataset_train, range(train_n))
+            dataset_val = torch.utils.data.Subset(dataset_val, range(val_n))
+            dataset_test = torch.utils.data.Subset(dataset_test, range(test_n))
+            logger.warning(
+                "debug_data_limit=%d → using train=%d, val=%d, test=%d images (smoke test).",
+                debug_limit,
+                train_n,
+                val_n,
+                test_n,
+            )
+
         # Tiny dataset guard
         effective_bs = args.batch_size * args.grad_accum_steps
         min_batches = extra_kwargs.get("min_batches", 5)

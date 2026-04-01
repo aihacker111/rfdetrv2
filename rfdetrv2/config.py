@@ -235,6 +235,8 @@ class TrainConfig(BaseModel):
     run: Optional[str] = None
     class_names: List[str] = None
     run_test: bool = False
+    # Cap train/val/test samples for smoke tests (0 = use full splits).
+    debug_data_limit: int = 0
     segmentation_head: bool = False
     eval_max_dets: int = 500
     freeze_encoder: bool = False  # Freeze DINOv3 backbone (no gradient update)
