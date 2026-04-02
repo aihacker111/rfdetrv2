@@ -20,7 +20,7 @@ from typing import Any, Optional
 import torch.utils.data
 import torchvision
 
-from rfdetrv2.datasets.coco import build_coco, build_roboflow_from_coco
+from rfdetrv2.datasets.coco_album import build_coco, build_roboflow_from_coco
 from rfdetrv2.datasets.o365 import build_o365
 from rfdetrv2.datasets.yolo import YoloDetection, build_roboflow_from_yolo
 

@@ -30,7 +30,7 @@ import torch
 import torch.nn.functional as F
 
 import rfdetrv2.util.misc as utils
-from rfdetrv2.datasets.coco import compute_multi_scale_scales
+from rfdetrv2.datasets.coco_album import compute_multi_scale_scales
 from rfdetrv2.util.misc import NestedTensor
 
 try:

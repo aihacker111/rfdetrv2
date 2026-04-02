@@ -199,7 +199,7 @@ class RFDETRV2:
                 num_classes = len(class_names)
 
         elif train_config.dataset_file == "coco":
-            from rfdetrv2.datasets.coco import infer_coco_num_classes_and_names
+            from rfdetrv2.datasets.coco_album import infer_coco_num_classes_and_names
 
             root = train_config.coco_path or dataset_dir
             inferred = infer_coco_num_classes_and_names(root)

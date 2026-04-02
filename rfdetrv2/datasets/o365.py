@@ -13,7 +13,11 @@ from typing import Any
 
 from PIL import Image
 
-from rfdetrv2.datasets.coco import CocoDetection, make_coco_transforms, make_coco_transforms_square_div_64
+from rfdetrv2.datasets.coco_album import (
+    CocoDetection,
+    make_coco_transforms,
+    make_coco_transforms_square_div_64,
+)
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -26,13 +30,33 @@ def build_o365_raw(image_set: str, args: Any, resolution: int) -> CocoDetection:
     }
     img_folder, ann_file = PATHS[image_set]
 
-
     square_resize_div_64 = getattr(args, 'square_resize_div_64', False)
+    document_aug = getattr(args, "document_aug", False)
 
     if square_resize_div_64:
-        dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms_square_div_64(image_set, resolution, multi_scale=args.multi_scale, expanded_scales=args.expanded_scales))
+        dataset = CocoDetection(
+            img_folder,
+            ann_file,
+            transforms=make_coco_transforms_square_div_64(
+                image_set,
+                resolution,
+                multi_scale=args.multi_scale,
+                expanded_scales=args.expanded_scales,
+                document_aug=document_aug,
+            ),
+        )
     else:
-        dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(image_set, resolution, multi_scale=args.multi_scale, expanded_scales=args.expanded_scales))
+        dataset = CocoDetection(
+            img_folder,
+            ann_file,
+            transforms=make_coco_transforms(
+                image_set,
+                resolution,
+                multi_scale=args.multi_scale,
+                expanded_scales=args.expanded_scales,
+                document_aug=document_aug,
+            ),
+        )
     return dataset
 
 

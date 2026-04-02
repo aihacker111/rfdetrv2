@@ -13,7 +13,7 @@ import torch
 from PIL import Image
 from torchvision.datasets import VisionDataset
 
-from rfdetrv2.datasets.coco import (
+from rfdetrv2.datasets.coco_album import (
     make_coco_transforms,
     make_coco_transforms_square_div_64,
 )
@@ -472,8 +472,9 @@ def build_roboflow_from_yolo(image_set: str, args: Any, resolution: int) -> Yolo
     multi_scale = getattr(args, "multi_scale", False)
     expanded_scales = getattr(args, "expanded_scales", None)
     do_random_resize_via_padding = getattr(args, "do_random_resize_via_padding", False)
-    patch_size = getattr(args, "patch_size", None)
-    num_windows = getattr(args, "num_windows", None)
+    patch_size = getattr(args, "patch_size", None) or 16
+    num_windows = getattr(args, "num_windows", None) or 4
+    document_aug = getattr(args, "document_aug", False)
 
     if square_resize_div_64:
         dataset = YoloDetection(
@@ -484,10 +485,11 @@ def build_roboflow_from_yolo(image_set: str, args: Any, resolution: int) -> Yolo
                 image_set,
                 resolution,
                 multi_scale=multi_scale,
-                expanded_scales=expanded_scales,
+                expanded_scales=expanded_scales or False,
                 skip_random_resize=not do_random_resize_via_padding,
                 patch_size=patch_size,
-                num_windows=num_windows
+                num_windows=num_windows,
+                document_aug=document_aug,
             ),
             include_masks=include_masks
         )
@@ -500,10 +502,11 @@ def build_roboflow_from_yolo(image_set: str, args: Any, resolution: int) -> Yolo
                 image_set,
                 resolution,
                 multi_scale=multi_scale,
-                expanded_scales=expanded_scales,
+                expanded_scales=expanded_scales or False,
                 skip_random_resize=not do_random_resize_via_padding,
                 patch_size=patch_size,
-                num_windows=num_windows
+                num_windows=num_windows,
+                document_aug=document_aug,
             ),
             include_masks=include_masks
         )

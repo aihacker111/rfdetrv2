@@ -902,6 +902,11 @@ def get_args_parser():
     parser.add_argument('--multi_scale',               action='store_true')
     parser.add_argument('--expanded_scales',           action='store_true')
     parser.add_argument('--do_random_resize_via_padding', action='store_true')
+    parser.add_argument(
+        '--document_aug',
+        action='store_true',
+        help='Document-oriented albumentations aug (coco_album / Roboflow COCO & YOLO).',
+    )
     parser.add_argument('--warmup_epochs', default=1, type=float)
     parser.add_argument('--lr_scheduler', default='linear',
                         choices=['step', 'cosine', 'linear', 'multistep', 'wsd', 'cosine_restart'])
@@ -1048,6 +1053,7 @@ def populate_args(
     multi_scale=False,
     expanded_scales=False,
     do_random_resize_via_padding=False,
+    document_aug=False,
     warmup_epochs=1,
     lr_scheduler='step',
     lr_min_factor=0.05,
@@ -1174,6 +1180,7 @@ def populate_args(
         multi_scale=multi_scale,
         expanded_scales=expanded_scales,
         do_random_resize_via_padding=do_random_resize_via_padding,
+        document_aug=document_aug,
         warmup_epochs=warmup_epochs,
         lr_scheduler=lr_scheduler,
         lr_min_factor=lr_min_factor,
