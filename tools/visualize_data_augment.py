@@ -1,32 +1,32 @@
 """
-Visualize DocumentAugmentation on a sample image.
+Visualize DocumentAugmentation on samples from a COCO dataset directory.
+
+Dataset structure expected:
+    dataset_dir/
+        images/         (or train/ val/)
+        annotations/    _annotations.coco.json  or  instances_train2017.json
+
 Usage:
-    python viz_augment.py --image path/to/image.jpg
-    python viz_augment.py --image path/to/image.jpg --rows 3 --cols 4
+    python viz_augment.py --dataset path/to/dataset --n 10
+    python viz_augment.py --dataset path/to/dataset --n 20 --out results/ --no_spatial
 """
 import argparse
+import json
 import random
+from pathlib import Path
 
 import albumentations as A
 import cv2
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
-from PIL import Image
 
-# ── paste or import your DocumentAugmentation here ──────────────────────────
-# from rfdetrv2.datasets.transforms import DocumentAugmentation
-# or copy the class inline below:
-
-import sys
-sys.path.insert(0, ".")
+# ── try project import, fall back to inline ──────────────────────────────────
 try:
+    import sys
+    sys.path.insert(0, ".")
     from rfdetrv2.datasets.transforms import DocumentAugmentation
 except ImportError:
-    # fallback: inline minimal version for standalone testing
-    import albumentations as A
-    import cv2
-
     _BBOX_PARAMS = A.BboxParams(
         format="pascal_voc",
         label_fields=["class_labels", "orig_indices"],
@@ -36,13 +36,11 @@ except ImportError:
     )
 
     class DocumentAugmentation:
-        def __init__(self, apply_spatial=True, p=0.5):
-            self.apply_spatial = apply_spatial
-            self.p = p
+        def __init__(self, apply_spatial=True, p=1.0):
             spatial_ops = ([
                 A.OneOf([
-                    A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.15, rotate_limit=0,
-                                       border_mode=cv2.BORDER_CONSTANT, p=1.0),
+                    A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.15,
+                                       rotate_limit=0, border_mode=cv2.BORDER_CONSTANT, p=1.0),
                     A.GridDistortion(num_steps=5, distort_limit=0.2,
                                      border_mode=cv2.BORDER_CONSTANT, p=1.0),
                     A.Rotate(limit=5, border_mode=cv2.BORDER_CONSTANT, crop_border=True, p=1.0),
@@ -60,129 +58,167 @@ except ImportError:
             ], p=0.35)]
             color_ops = [A.OneOf([
                 A.RandomBrightnessContrast(brightness_limit=0.25, contrast_limit=0.25, p=1.0),
-                A.RandomGamma(gamma_limit=(70,130), p=1.0),
+                A.RandomGamma(gamma_limit=(70, 130), p=1.0),
                 A.RGBShift(r_shift_limit=15, g_shift_limit=15, b_shift_limit=15, p=1.0),
             ], p=0.4)]
             degradation_ops = [A.OneOf([
-                A.Defocus(radius=(1,3), alias_blur=0.1, p=1.0),
-                A.MotionBlur(blur_limit=(3,7), p=1.0),
-                A.GaussianBlur(blur_limit=(3,5), sigma_limit=0, p=1.0),
-                A.Morphological(scale=(1,3), operation="erosion", p=0.5),
-                A.Morphological(scale=(1,3), operation="dilation", p=0.5),
+                A.Defocus(radius=(1, 3), alias_blur=0.1, p=1.0),
+                A.MotionBlur(blur_limit=(3, 7), p=1.0),
+                A.GaussianBlur(blur_limit=(3, 5), sigma_limit=0, p=1.0),
+                A.Morphological(scale=(1, 3), operation="erosion", p=0.5),
+                A.Morphological(scale=(1, 3), operation="dilation", p=0.5),
             ], p=0.35)]
             all_ops = spatial_ops + background_ops + color_ops + degradation_ops
             self._compose = A.Compose(
-                [A.SomeOf(all_ops, n=min(2, len(all_ops)), replace=False, p=self.p)],
+                [A.SomeOf(all_ops, n=min(2, len(all_ops)), replace=False, p=p)],
                 bbox_params=_BBOX_PARAMS,
             )
 
-        def __call__(self, img, target=None):
-            was_pil = isinstance(img, Image.Image)
-            img_np = np.asarray(img) if was_pil else img
-            bboxes = target["bboxes"] if target and "bboxes" in target else []
-            class_labels = target["class_labels"] if target and "class_labels" in target else []
+        def __call__(self, img, bboxes, class_labels):
             orig_indices = list(range(len(bboxes)))
             result = self._compose(
-                image=img_np, bboxes=bboxes,
+                image=img, bboxes=bboxes,
                 class_labels=class_labels, orig_indices=orig_indices, masks=[],
             )
-            out = Image.fromarray(result["image"]) if was_pil else result["image"]
-            out_target = None
-            if target is not None:
-                out_target = {
-                    "bboxes": result["bboxes"],
-                    "class_labels": result["class_labels"],
-                }
-            return out, out_target
+            return result["image"], result["bboxes"], result["class_labels"]
 
 
-# ── helpers ──────────────────────────────────────────────────────────────────
+# ── dataset loader ────────────────────────────────────────────────────────────
 
-def load_image(path: str) -> np.ndarray:
-    img = cv2.imread(path)
-    if img is None:
-        raise FileNotFoundError(f"Cannot load image: {path}")
-    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-
-def draw_boxes(ax, img: np.ndarray, bboxes, labels, title: str) -> None:
-    ax.imshow(img)
-    ax.set_title(title, fontsize=8, pad=3)
-    ax.axis("off")
-    colors = plt.cm.get_cmap("tab10").colors
-    for i, (x1, y1, x2, y2) in enumerate(bboxes):
-        c = colors[int(labels[i]) % len(colors)] if labels else "red"
-        rect = patches.Rectangle(
-            (x1, y1), x2 - x1, y2 - y1,
-            linewidth=1.2, edgecolor=c, facecolor="none",
-        )
-        ax.add_patch(rect)
-
-
-def make_dummy_boxes(img: np.ndarray):
-    """Generate a few plausible bounding boxes when no annotation is provided."""
-    h, w = img.shape[:2]
-    boxes = [
-        [int(w * 0.05), int(h * 0.05), int(w * 0.45), int(h * 0.25)],
-        [int(w * 0.05), int(h * 0.30), int(w * 0.90), int(h * 0.50)],
-        [int(w * 0.05), int(h * 0.55), int(w * 0.60), int(h * 0.75)],
+def find_annotation_file(dataset_dir: Path) -> Path:
+    candidates = [
+        dataset_dir / "train" / "_annotations.coco.json",
+        dataset_dir / "annotations" / "instances_train2017.json",
+        dataset_dir / "annotations" / "train.json",
+        dataset_dir / "_annotations.coco.json",
     ]
-    labels = [0, 1, 2]
-    return boxes, labels
+    for p in candidates:
+        if p.is_file():
+            return p
+    ann_dir = dataset_dir / "annotations"
+    if ann_dir.is_dir():
+        for p in sorted(ann_dir.glob("*.json")):
+            return p
+    raise FileNotFoundError(f"No annotation JSON found under {dataset_dir}")
+
+
+def find_image_dir(dataset_dir: Path) -> Path:
+    for name in ("images", "train", "val"):
+        p = dataset_dir / name
+        if p.is_dir():
+            return p
+    return dataset_dir
+
+
+def load_coco(dataset_dir: Path):
+    ann_file = find_annotation_file(dataset_dir)
+    img_dir  = find_image_dir(dataset_dir)
+    print(f"Annotation : {ann_file}")
+    print(f"Images dir : {img_dir}")
+
+    with open(ann_file) as f:
+        coco = json.load(f)
+
+    cat_map = {c["id"]: c["name"] for c in coco.get("categories", [])}
+    ann_by_img = {}
+    for ann in coco.get("annotations", []):
+        ann_by_img.setdefault(ann["image_id"], []).append(ann)
+
+    samples = []
+    for img_info in coco["images"]:
+        img_path = img_dir / img_info["file_name"]
+        if not img_path.exists():
+            img_path = img_dir / Path(img_info["file_name"]).name
+        if not img_path.exists():
+            continue
+        samples.append({
+            "path":    img_path,
+            "anns":    ann_by_img.get(img_info["id"], []),
+            "cat_map": cat_map,
+        })
+    print(f"Found {len(samples)} images with matched paths.\n")
+    return samples
+
+
+# ── draw ──────────────────────────────────────────────────────────────────────
+
+COLORS = plt.cm.get_cmap("tab10").colors
+
+
+def draw_image(ax, img, bboxes, labels, cat_map, title):
+    ax.imshow(img)
+    ax.set_title(title, fontsize=10)
+    ax.axis("off")
+    for i, (x1, y1, x2, y2) in enumerate(bboxes):
+        cid   = int(labels[i])
+        color = COLORS[cid % len(COLORS)]
+        name  = cat_map.get(cid, str(cid))
+        ax.add_patch(patches.Rectangle(
+            (x1, y1), x2 - x1, y2 - y1,
+            linewidth=1.5, edgecolor=color, facecolor="none",
+        ))
+        ax.text(x1 + 2, y1 + 12, name, fontsize=7,
+                color="white", backgroundcolor=color)
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--image", required=True, help="Path to input image")
-    parser.add_argument("--rows", type=int, default=3, help="Grid rows")
-    parser.add_argument("--cols", type=int, default=4, help="Grid cols")
-    parser.add_argument("--p", type=float, default=1.0,
-                        help="Augmentation probability (1.0 = always apply)")
-    parser.add_argument("--no_spatial", action="store_true",
-                        help="Disable spatial transforms (layout-analysis mode)")
-    parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--out", default=None, help="Save figure to file instead of showing")
+    parser.add_argument("--dataset",    required=True,           help="Dataset root directory")
+    parser.add_argument("--n",          type=int, default=10,    help="Number of sample images")
+    parser.add_argument("--out",        default="aug_output",    help="Output folder")
+    parser.add_argument("--no_spatial", action="store_true",     help="Disable spatial transforms")
+    parser.add_argument("--p",          type=float, default=1.0, help="Augmentation probability")
+    parser.add_argument("--seed",       type=int,   default=42)
     args = parser.parse_args()
 
-    if args.seed is not None:
-        random.seed(args.seed)
-        np.random.seed(args.seed)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
 
-    img = load_image(args.image)
-    bboxes, labels = make_dummy_boxes(img)
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    aug = DocumentAugmentation(apply_spatial=not args.no_spatial, p=args.p)
+    samples = load_coco(Path(args.dataset))
+    if not samples:
+        raise RuntimeError("No images found in dataset.")
 
-    n_aug = args.rows * args.cols - 1          # first cell = original
-    fig, axes = plt.subplots(args.rows, args.cols, figsize=(args.cols * 3, args.rows * 3))
-    axes = axes.flatten()
+    chosen = random.sample(samples, min(args.n, len(samples)))
+    aug    = DocumentAugmentation(apply_spatial=not args.no_spatial, p=args.p)
 
-    # ── cell 0: original ──────────────────────────────────────────────────────
-    draw_boxes(axes[0], img, bboxes, labels, "original")
+    for idx, sample in enumerate(chosen):
+        img_bgr = cv2.imread(str(sample["path"]))
+        if img_bgr is None:
+            print(f"  skip (unreadable): {sample['path']}")
+            continue
+        img     = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        h, w    = img.shape[:2]
+        cat_map = sample["cat_map"]
 
-    # ── remaining cells: augmented ────────────────────────────────────────────
-    category_labels = ["spatial", "background", "color", "degradation"]
-    for i in range(1, len(axes)):
-        target = {"bboxes": bboxes, "class_labels": labels}
-        aug_img, aug_target = aug(img.copy(), target)
-        aug_np = np.asarray(aug_img) if isinstance(aug_img, Image.Image) else aug_img
-        aug_boxes = aug_target["bboxes"] if aug_target else []
-        aug_labels = aug_target["class_labels"] if aug_target else []
-        draw_boxes(axes[i], aug_np, aug_boxes, aug_labels, f"aug #{i}")
+        # parse annotations → xyxy
+        bboxes, class_labels = [], []
+        for ann in sample["anns"]:
+            x, y, bw, bh = ann["bbox"]
+            x2, y2 = min(x + bw, w), min(y + bh, h)
+            if x2 > x and y2 > y:
+                bboxes.append([x, y, x2, y2])
+                class_labels.append(ann["category_id"])
 
-    fig.suptitle(
-        f"DocumentAugmentation  |  spatial={'on' if not args.no_spatial else 'off'}  p={args.p}",
-        fontsize=10, y=1.01,
-    )
-    plt.tight_layout()
+        aug_img, aug_boxes, aug_labels = aug(img.copy(), bboxes, class_labels)
 
-    if args.out:
-        plt.savefig(args.out, bbox_inches="tight", dpi=150)
-        print(f"Saved to {args.out}")
-    else:
-        plt.show()
+        # side-by-side: original | augmented
+        fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(14, 6))
+        draw_image(ax_l, img,     bboxes,    class_labels, cat_map, "original")
+        draw_image(ax_r, aug_img, aug_boxes, aug_labels,   cat_map, "augmented")
+        fig.suptitle(Path(sample["path"]).name, fontsize=11, y=1.01)
+        plt.tight_layout()
+
+        out_path = out_dir / f"{idx:03d}_{Path(sample['path']).stem}.png"
+        plt.savefig(out_path, bbox_inches="tight", dpi=130)
+        plt.close(fig)
+        print(f"[{idx+1}/{len(chosen)}] saved → {out_path}")
+
+    print(f"\nDone. {len(chosen)} images saved to '{out_dir}/'")
 
 
 if __name__ == "__main__":
