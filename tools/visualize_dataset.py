@@ -7,19 +7,19 @@ Each image is saved as its own file under save_dir.
 Usage
 -----
     # Save every image individually
-    python visualize_dataset.py --data_dir /path/to/doclaynet --split train --save_dir ./viz
+    python tools/visualize_dataset.py --data_dir /path/to/doclaynet --split train --save_dir ./viz
 
     # Random sample of N images
-    python visualize_dataset.py --data_dir /path/to/doclaynet --num_images 20 --save_dir ./viz
+    python tools/visualize_dataset.py --data_dir /path/to/doclaynet --num_images 20 --save_dir ./viz
 
     # Single image by ID
-    python visualize_dataset.py --data_dir /path/to/doclaynet --image_id 42 --save_dir ./viz
+    python tools/visualize_dataset.py --data_dir /path/to/doclaynet --image_id 42 --save_dir ./viz
 
     # Filter by category
-    python visualize_dataset.py --data_dir /path/to/doclaynet --category "Text" --save_dir ./viz
+    python tools/visualize_dataset.py --data_dir /path/to/doclaynet --category "Text" --save_dir ./viz
 
     # Dataset-level statistics chart
-    python visualize_dataset.py --data_dir /path/to/doclaynet --stats --save_dir ./viz
+    python tools/visualize_dataset.py --data_dir /path/to/doclaynet --stats --save_dir ./viz
 
 Expected layout
 ---------------

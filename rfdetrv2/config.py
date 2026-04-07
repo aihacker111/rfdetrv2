@@ -44,10 +44,6 @@ class ModelConfig(BaseModel):
     group_detr: int = 13
     gradient_checkpointing: bool = False
     use_windowed_attn: bool = False  # DINOv3: split image into num_windows² tiles for memory-efficient attention
-    use_rsa: bool = False  # SRA: chỉ bật khi CLI / kwargs (full-res; tắt windowed attn)
-    sra_shared: bool = True  # True = một khối SRA cho mọi mức feature (cùng dim); ít param ~× số mức
-    sra_G: int = 32  # Số centroid G (nhỏ hơn → ít param ở W_r; 64→32 ~giảm ~1/2 phần routing)
-    sra_heads: int = 8  # SRA heads (4 thay 8 cũng giảm param MHA nếu cần)
     use_convnext_projector: bool = True  # True=ConvNeXt fusion, False=C2f (backbone projector)
     positional_encoding_size: int
     ia_bce_loss: bool = True
@@ -56,6 +52,11 @@ class ModelConfig(BaseModel):
     segmentation_head: bool = False
     mask_downsample_ratio: int = 4
     license: str = "Apache-2.0"
+    # CPFE — Cortical Perceptual Feature Enhancement
+    use_cpfe: bool = True        # master toggle
+    cpfe_use_sdg: bool = True    # Spectral Decomposition Gate (Center-Surround)
+    cpfe_use_dn: bool = True     # Divisive Normalization (Lateral Inhibition)
+    cpfe_use_tpr: bool = True    # Top-Down Predictive Refinement (Cortical Feedback)
 
     @field_validator("pretrain_weights", "pretrained_encoder", mode="after")
     @classmethod
@@ -214,6 +215,11 @@ class TrainConfig(BaseModel):
     prototype_use_freq_weight: bool = True # [ENH-2] Class-frequency weighting
     prototype_use_quality_weight: bool = True  # [ENH-4] Prototype quality weighting
     prototype_use_repulsion: bool = True   # [ENH-3] Toggle inter-class repulsion
+    # CPFE — Cortical Perceptual Feature Enhancement
+    use_cpfe: bool = True        # master toggle
+    cpfe_use_sdg: bool = True    # Spectral Decomposition Gate (Center-Surround)
+    cpfe_use_dn: bool = True     # Divisive Normalization (Lateral Inhibition)
+    cpfe_use_tpr: bool = True    # Top-Down Predictive Refinement (Cortical Feedback)
     dataset_file: Literal["coco", "o365", "roboflow"] = "roboflow"
     square_resize_div_64: bool = True
     dataset_dir: str  # COCO layout root (train/, val/, annotations/); also default for coco_path when unset

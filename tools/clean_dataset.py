@@ -18,7 +18,7 @@ Output (saved next to originals):
         └── test_clean.json
 
 Usage:
-    python clean_doclaynet.py --data_dir /path/to/doclaynet
+    python tools/clean_dataset.py --data_dir /path/to/doclaynet
 """
 
 import json

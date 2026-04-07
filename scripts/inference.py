@@ -12,6 +12,10 @@ Usage
   python inference.py --weights runs/exp1/checkpoint_best_total.pth --image photo.jpg
   python inference.py --weights runs/exp1/checkpoint_best_total.pth --image photo.jpg --save out.jpg
 
+  # Optional DINOv3 backbone weights (override checkpoint / auto-resolve):
+  python inference.py --weights ckpt.pth --image a.jpg --pretrained-encoder /path/to/dinov3.pth
+  # Or: PRETRAINED_ENCODER=/path/to/dinov3.pth python inference.py --weights ckpt.pth --image a.jpg
+
   # Video
   python inference.py --weights runs/exp1/checkpoint_best_total.pth --video clip.mp4
   python inference.py --weights runs/exp1/checkpoint_best_total.pth --video clip.mp4 --output det.mp4
@@ -20,19 +24,22 @@ Usage
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
-from PIL import Image
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from rfdetrv2 import RFDETRBase, RFDETRLarge, RFDETRNano, RFDETRSmall
+from rfdetrv2.util.pretrained import model_size_from_encoder, resolve_pretrained_encoder_path
+
+_DEFAULT_PRETRAINED_ENV = os.environ.get("PRETRAINED_ENCODER")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -49,16 +56,20 @@ _ENCODER_TO_MODEL = {
 }
 
 
-def _load_checkpoint_meta(weights: str) -> tuple[type, int, dict[int, str]]:
+def _load_checkpoint_meta(
+    weights: str,
+) -> tuple[type, int, dict[int, str], str, int, str | None]:
     """
     Read the checkpoint and return:
       - model_class  : the right RFDETRxxx class
       - num_classes  : number of foreground classes
       - class_names  : {1: "Caption", 2: "Footnote", …}
+      - encoder      : e.g. ``dinov3_base``
+      - resolution   : training input size
+      - pretrained_encoder_saved : path from ``args.pretrained_encoder`` if any
 
-    All three values come from ``ckpt['args']`` which is always saved
-    during fine-tuning.  Falls back to detection-head tensor shape for
-    checkpoints that pre-date the ``class_names`` field.
+    Values come from ``ckpt['args']`` when present.  Falls back to detection-head
+    tensor shape for ``num_classes`` on older checkpoints.
     """
     path = Path(weights)
     if not path.exists():
@@ -72,7 +83,7 @@ def _load_checkpoint_meta(weights: str) -> tuple[type, int, dict[int, str]]:
 
     # ── num_classes ──────────────────────────────────────────────
     # Primary source: args.num_classes (always present after fine-tuning)
-    num_classes = getattr(args, "num_classes", None)
+    num_classes = getattr(args, "num_classes", None) if args is not None else None
 
     # Fallback: read from detection-head tensor shape (K+1 logits)
     if num_classes is None:
@@ -89,7 +100,7 @@ def _load_checkpoint_meta(weights: str) -> tuple[type, int, dict[int, str]]:
 
     # ── class_names ──────────────────────────────────────────────
     # args.class_names is a list ["Caption", "Footnote", …] after fine-tuning
-    raw_names = getattr(args, "class_names", None)
+    raw_names = getattr(args, "class_names", None) if args is not None else None
     if isinstance(raw_names, (list, tuple)) and raw_names:
         # COCO convention: category ids start at 1
         class_names = {i + 1: str(n) for i, n in enumerate(raw_names)}
@@ -104,8 +115,17 @@ def _load_checkpoint_meta(weights: str) -> tuple[type, int, dict[int, str]]:
         )
 
     # ── model class (auto-detect from encoder + resolution) ──────
-    encoder    = getattr(args, "encoder",    "dinov3_base")
-    resolution = getattr(args, "resolution", 560)
+    encoder = getattr(args, "encoder", "dinov3_base") if args is not None else "dinov3_base"
+    resolution = int(getattr(args, "resolution", 560) if args is not None else 560)
+    pretrained_encoder_saved = (
+        getattr(args, "pretrained_encoder", None) if args is not None else None
+    )
+    if isinstance(pretrained_encoder_saved, str) and pretrained_encoder_saved.strip():
+        pretrained_encoder_saved = os.path.realpath(
+            os.path.expanduser(pretrained_encoder_saved.strip())
+        )
+    else:
+        pretrained_encoder_saved = None
 
     if encoder == "dinov3_base" and resolution > 560:
         model_class = RFDETRLarge
@@ -118,19 +138,47 @@ def _load_checkpoint_meta(weights: str) -> tuple[type, int, dict[int, str]]:
         f"  num_classes= {num_classes}\n"
         f"  classes    = {list(class_names.values())}"
     )
-    return model_class, num_classes, class_names
+    return (
+        model_class,
+        num_classes,
+        class_names,
+        encoder,
+        resolution,
+        pretrained_encoder_saved,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────
 # Model factory
 # ─────────────────────────────────────────────────────────────────
 
-def load_model(weights: str, device: str):
+def load_model(
+    weights: str,
+    device: str,
+    *,
+    pretrained_encoder: str | None = None,
+):
     """Build and return (model, class_names) ready for inference."""
-    model_class, num_classes, class_names = _load_checkpoint_meta(weights)
+    (
+        model_class,
+        num_classes,
+        class_names,
+        encoder,
+        resolution,
+        pe_ckpt,
+    ) = _load_checkpoint_meta(weights)
+
+    explicit = pretrained_encoder or _DEFAULT_PRETRAINED_ENV or pe_ckpt
+    if explicit:
+        explicit = os.path.realpath(os.path.expanduser(explicit))
+
+    model_size = model_size_from_encoder(encoder, resolution)
+    pe_resolved = resolve_pretrained_encoder_path(_ROOT, model_size, explicit=explicit)
+    print(f"[info] pretrained_encoder = {pe_resolved}")
 
     model = model_class(
         pretrain_weights=weights,
+        pretrained_encoder=pe_resolved,
         num_classes=num_classes,
         device=device,
     )
@@ -197,7 +245,11 @@ def draw_boxes(
 # ─────────────────────────────────────────────────────────────────
 
 def run_image(args: argparse.Namespace) -> None:
-    model, class_names = load_model(args.weights, args.device)
+    model, class_names = load_model(
+        args.weights,
+        args.device,
+        pretrained_encoder=args.pretrained_encoder,
+    )
 
     detections = model.predict(args.image, threshold=args.threshold)
     print(f"\n[result] {len(detections)} detection(s)")
@@ -232,7 +284,11 @@ def run_image(args: argparse.Namespace) -> None:
 # ─────────────────────────────────────────────────────────────────
 
 def run_video(args: argparse.Namespace) -> None:
-    model, class_names = load_model(args.weights, args.device)
+    model, class_names = load_model(
+        args.weights,
+        args.device,
+        pretrained_encoder=args.pretrained_encoder,
+    )
 
     cap = cv2.VideoCapture(args.video)
     if not cap.isOpened():
@@ -302,6 +358,15 @@ def main() -> None:
     p.add_argument("--weights",   required=True,  help="Path to .pth checkpoint.")
     p.add_argument("--device",    default="cuda",  choices=["cuda", "cpu", "mps"])
     p.add_argument("--threshold", type=float, default=0.35, help="Confidence threshold.")
+    p.add_argument(
+        "--pretrained-encoder",
+        default=None,
+        metavar="PATH",
+        help=(
+            "DINOv3 encoder .pth (or repo::weights). "
+            "Default: checkpoint args, else PRETRAINED_ENCODER env, else dinov3_pretrained/ / download."
+        ),
+    )
 
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--image", help="Path to an input image.")

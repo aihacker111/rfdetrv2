@@ -1,8 +1,8 @@
 """
-Download official DINOv3 LVD1689M checkpoints into ``<project_root>/dinov3_pretrained``.
+DINOv3 LVD1689M weights → ``<project_root>/dinov3_pretrained`` (HuggingFace).
 
-Weights are hosted on HuggingFace: https://huggingface.co/myn0908/dinov3
-Use is subject to the DINOv3 License Agreement.
+Typical entry: :func:`resolve_pretrained_encoder_path` (or import both resolvers from
+``rfdetrv2.util.pretrained``).  See ``rfdetrv2.util.rfdetr_pretrained`` for RF-DETR COCO checkpoints.
 """
 from __future__ import annotations
 
@@ -42,6 +42,27 @@ DINOV3_PRETRAINED_MANIFEST: tuple[tuple[str, str], ...] = (
         "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
     ),
 )
+
+# RF-DETR model size → LVD1689M encoder file (``large`` shares ViT-B with ``base``).
+DINO_WEIGHTS_BY_SIZE: dict[str, str] = {
+    "nano": DINOV3_PRETRAINED_MANIFEST[0][0],
+    "small": DINOV3_PRETRAINED_MANIFEST[1][0],
+    "base": DINOV3_PRETRAINED_MANIFEST[2][0],
+    "large": DINOV3_PRETRAINED_MANIFEST[2][0],
+}
+
+
+def model_size_from_encoder(encoder: str, resolution: int) -> str:
+    """Map ``args.encoder`` + training ``resolution`` to ``nano``/``small``/``base``/``large``."""
+    if encoder == "dinov3_nano":
+        return "nano"
+    if encoder == "dinov3_small":
+        return "small"
+    if encoder == "dinov3_large":
+        return "large"
+    if encoder == "dinov3_base":
+        return "large" if int(resolution) > 560 else "base"
+    return "base"
 
 
 def dinov3_pretrained_dir(project_root: Path | None = None) -> Path:
@@ -247,33 +268,24 @@ def resolve_pretrained_encoder_path(
     project_root: Path,
     model_size: str,
     *,
-    explicit: str | None,
-    weights_by_size: dict[str, str],
+    explicit: str | None = None,
+    weights_by_size: dict[str, str] | None = None,
 ) -> str:
-    """Return path to a DINOv3 ``.pth`` weight file.
+    """Return path to a DINOv3 ``.pth`` (local or auto-download from HuggingFace).
 
-    Resolution order
-    ----------------
-    1. *explicit* path — used as-is if provided.
-    2. ``dinov3_pretrained/<filename>`` under project root — if the file exists.
-    3. ``<project_root>/<filename>`` — legacy flat placement.
-    4. Auto-download from HuggingFace into ``dinov3_pretrained/``.
-
-    Parameters
-    ----------
-    project_root:
-        Root of the RF-DETR project tree.
-    model_size:
-        One of ``"nano"``, ``"small"``, ``"base"``, ``"large"``.
-    explicit:
-        User-supplied path (``pretrained_encoder`` argument).
-    weights_by_size:
-        Mapping from *model_size* to the expected ``.pth`` filename.
+    Order: *explicit* if set → ``dinov3_pretrained/<file>`` → project root → download.
+    *weights_by_size* defaults to :data:`DINO_WEIGHTS_BY_SIZE`.
     """
     if explicit:
         return explicit
 
-    fname = weights_by_size[model_size]
+    table = DINO_WEIGHTS_BY_SIZE if weights_by_size is None else weights_by_size
+    try:
+        fname = table[model_size]
+    except KeyError as e:
+        raise ValueError(
+            f"Unknown model_size={model_size!r}; expected one of {sorted(table)}"
+        ) from e
     p_hub  = dinov3_pretrained_dir(project_root) / fname
     p_root = project_root / fname
 

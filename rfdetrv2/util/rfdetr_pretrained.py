@@ -1,16 +1,72 @@
 """
-Download RF-DETR COCO-trained checkpoints from Hugging Face into ``<project_root>/rfdetr_pretrained``.
+RF-DETR COCO checkpoints → ``<project_root>/rfdetr_pretrained`` (HuggingFace).
 
-Repo: https://huggingface.co/myn0908/rfdetrv2
+Use :func:`resolve_rfdetr_coco_checkpoint` for CLI-style resolution (path or auto-download).
 """
 from __future__ import annotations
 
 import logging
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
-from rfdetrv2.util.dinov3_pretrained import _download_file, _exclusive_download_lock
+
+# ---------------------------------------------------------------------------
+# Internal download utilities (self-contained, no dinov3_pretrained dependency)
+# ---------------------------------------------------------------------------
+
+def _download_file(
+    url: str, dest: Path, chunk_size: int = 1024 * 1024, *, timeout: int = 120
+) -> None:
+    """Stream-download *url* into *dest*, writing atomically via a .part file."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    req = Request(url, headers={"User-Agent": "RF-DETR/rfdetr_pretrained"})
+    try:
+        with urlopen(req, timeout=timeout) as resp, open(tmp, "wb") as out:
+            total      = int(resp.headers.get("Content-Length", 0))
+            downloaded = 0
+            while True:
+                chunk = resp.read(chunk_size)
+                if not chunk:
+                    break
+                out.write(chunk)
+                downloaded += len(chunk)
+                if total:
+                    pct = downloaded * 100 // total
+                    print(
+                        f"\r  {dest.name}: {pct}% ({downloaded/1e6:.1f}/{total/1e6:.1f} MB)",
+                        end="", file=sys.stderr, flush=True,
+                    )
+            if total:
+                print(file=sys.stderr)
+        tmp.replace(dest)
+    except (OSError, URLError):
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+        raise
+
+
+@contextmanager
+def _exclusive_download_lock(lock_path: Path):
+    """Serialize concurrent downloads of the same file (multi-process safe)."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        yield
+        return
+    import fcntl
+    with open(lock_path, "a+b") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 logger = logging.getLogger(__name__)
 
@@ -72,21 +128,12 @@ def resolve_rfdetr_coco_checkpoint(
     project_root: Path,
     model_size: str,
     *,
-    explicit: str | None,
+    explicit: str | None = None,
 ) -> str | None:
-    """Return path to a COCO-pretrained RF-DETR ``.pth`` for ``Model(pretrain_weights=...)``.
+    """Path to COCO RF-DETR ``.pth`` for ``pretrain_weights=`` (local, or auto-download).
 
-    Parameters
-    ----------
-    explicit:
-        Optional path from env/CLI. If it points to an existing file, that path is used.
-        If set but missing, falls back to downloading the official Hub file for *model_size*.
-        If ``None`` or empty, downloads (or reuses) under ``rfdetr_pretrained/``.
-
-    Returns
-    -------
-    str | None
-        Absolute path to ``.pth``, or ``None`` if ``RFDETR_SKIP_COCO_CHECKPOINT=1``.
+    *explicit*: CLI/env path if the file exists; otherwise Hub file for *model_size*.
+    Returns ``None`` when ``RFDETR_SKIP_COCO_CHECKPOINT=1``.
     """
     if os.environ.get("RFDETR_SKIP_COCO_CHECKPOINT", "").strip().lower() in (
         "1",

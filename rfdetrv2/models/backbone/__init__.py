@@ -68,27 +68,23 @@ def build_backbone(
     target_shape,
     rms_norm,
     backbone_lora,
-    force_no_pretrain,
     gradient_checkpointing,
     load_dinov3_weights,
     patch_size,
     num_windows,
     positional_encoding_size,
     use_windowed_attn=False,
-    use_rsa=False,
-    sra_shared=True,
-    sra_G=32,
-    sra_heads=8,
     use_convnext_projector=True,
+    # CPFE — Cortical Perceptual Feature Enhancement
+    use_cpfe=True,
+    cpfe_use_sdg=True,
+    cpfe_use_dn=True,
+    cpfe_use_tpr=True,
+    # Legacy / ignored kwargs
+    force_no_pretrain=False,
+    **_ignored,
 ):
-    """
-    Useful args:
-        - encoder: encoder name
-        - lr_encoder:
-        - dilation
-        - use_checkpoint: for swin only for now
-
-    """
+    """Build backbone: DINOv3 encoder + multi-scale projector + position encoding."""
     position_embedding = build_position_encoding(hidden_dim, position_embedding)
 
     backbone = Backbone(
@@ -111,12 +107,11 @@ def build_backbone(
         num_windows=num_windows,
         positional_encoding_size=positional_encoding_size,
         use_windowed_attn=use_windowed_attn,
-        use_rsa=use_rsa,
-        sra_shared=sra_shared,
-        sra_G=sra_G,
-        sra_heads=sra_heads,
         use_convnext_projector=use_convnext_projector,
+        use_cpfe=use_cpfe,
+        cpfe_use_sdg=cpfe_use_sdg,
+        cpfe_use_dn=cpfe_use_dn,
+        cpfe_use_tpr=cpfe_use_tpr,
     )
 
-    model = Joiner(backbone, position_embedding)
-    return model
+    return Joiner(backbone, position_embedding)

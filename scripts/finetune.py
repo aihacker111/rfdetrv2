@@ -33,20 +33,15 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from rfdetrv2 import RFDETRV2Base, RFDETRV2Large, RFDETRV2Nano, RFDETRV2Small
-from rfdetrv2.util.dinov3_pretrained import resolve_pretrained_encoder_path
-from rfdetrv2.util.rfdetr_pretrained import resolve_rfdetr_coco_checkpoint
+from rfdetrv2.util.pretrained import (
+    resolve_pretrained_encoder_path,
+    resolve_rfdetr_coco_checkpoint,
+)
 
 _DEFAULT_DATASET = os.environ.get("DATASET_DIR", "")
 _DEFAULT_OUTPUT = os.environ.get("OUTPUT_DIR", "output/finetune")
 _DEFAULT_PRETRAINED = os.environ.get("PRETRAINED_ENCODER")
 _DEFAULT_COCO_WEIGHTS = os.environ.get("COCO_WEIGHTS")
-
-DINO_WEIGHTS_BY_SIZE: Final[dict[str, str]] = {
-    "nano": "dinov3_vits16_pretrain_lvd1689m-08c60483.pth",
-    "small": "dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth",
-    "base": "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
-    "large": "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
-}
 
 _MODELS: Final[dict[str, Callable[..., Any]]] = {
     "nano": RFDETRV2Nano,
@@ -161,7 +156,6 @@ def main() -> None:
         _PROJECT_ROOT,
         args.model_size,
         explicit=explicit_enc if explicit_enc else None,
-        weights_by_size=DINO_WEIGHTS_BY_SIZE,
     )
 
     coco_ckpt = resolve_rfdetr_coco_checkpoint(
@@ -174,7 +168,6 @@ def main() -> None:
     model_kw: dict[str, Any] = dict(
         pretrained_encoder=pretrained_path,
         use_windowed_attn=args.use_windowed_attn,
-        use_rsa=False,
         use_convnext_projector=use_convnext,
         device=args.device,
     )

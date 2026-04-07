@@ -7,8 +7,8 @@ Dataset structure expected:
         annotations/    _annotations.coco.json  or  instances_train2017.json
 
 Usage:
-    python viz_augment.py --dataset path/to/dataset --n 10
-    python viz_augment.py --dataset path/to/dataset --n 20 --out results/ --no_spatial
+    python tools/visualize_augment.py --dataset path/to/dataset --n 10
+    python tools/visualize_augment.py --dataset path/to/dataset --n 20 --out results/ --no_spatial
 """
 import argparse
 import json
