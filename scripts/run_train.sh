@@ -1,6 +1,6 @@
 #!/bin/sh
 # =============================================================================
-# RF-DETR v2 — Train from Scratch (Single-GPU)
+# RF-DETR v2 — Train from Scratch (torchrun / multi-GPU-ready)
 #
 # ⚠  Đây là script TRAIN FROM SCRATCH:
 #    - Detection head được khởi tạo ngẫu nhiên (KHÔNG tải RF-DETR COCO weights)
@@ -9,6 +9,8 @@
 # → Muốn finetune từ checkpoint COCO?  Dùng scripts/run_finetune.sh
 #
 # Chạy:  sh scripts/run_train.sh
+# Distributed: dùng torchrun nếu có trong PATH, không thì python3 -m torch.distributed.run
+#   NPROC_PER_NODE=2 CUDA_VISIBLE_DEVICES=0,1 sh scripts/run_train.sh
 # =============================================================================
 
 set -e
@@ -107,10 +109,14 @@ PROTOTYPE_USE_QUALITY_WEIGHT=true
 PROTOTYPE_USE_REPULSION=true
 
 # =============================================================================
-# GPU
+# GPU / torchrun (distributed)
 # =============================================================================
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export CUDA_VISIBLE_DEVICES
+# Số process trên node (thường = số GPU). 1 = một GPU.
+NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
+TORCHRUN_EXTRA="${TORCHRUN_EXTRA:-}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 # =============================================================================
 # BUILD ARGS (POSIX sh — dùng positional params "$@")
@@ -231,7 +237,17 @@ echo "  Model   : ${MODEL_SIZE}  |  Epochs: ${EPOCHS}  |  BS: ${BATCH_SIZE}x${GR
 echo "  LW++    : vFPN=${USE_VIRTUAL_FPN_PROJECTOR}  P6=${PROJECTOR_INCLUDES_P6}  RoPE=${USE_SCALE_AWARE_ROPE}  EProto=${ENHANCED_PROTOTYPE_MEMORY}"
 echo "  Dataset : ${DATASET_DIR}"
 echo "  Output  : ${OUTPUT_DIR}"
-echo "  GPU     : CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+echo "  GPU     : CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}  nproc_per_node=${NPROC_PER_NODE}"
 echo "============================================================"
 
-exec python3 "${SCRIPT_DIR}/train.py" "$@"
+# shellcheck disable=SC2086
+_run_torch() {
+    if command -v torchrun >/dev/null 2>&1; then
+        exec torchrun --nproc_per_node="${NPROC_PER_NODE}" ${TORCHRUN_EXTRA} \
+            "${SCRIPT_DIR}/train.py" "$@"
+    fi
+    exec "${PYTHON_BIN}" -m torch.distributed.run \
+        --nproc_per_node="${NPROC_PER_NODE}" ${TORCHRUN_EXTRA} \
+        "${SCRIPT_DIR}/train.py" "$@"
+}
+_run_torch "$@"
