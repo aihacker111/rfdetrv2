@@ -67,9 +67,9 @@ PROTOTYPE_HARD_NEG_K=5
 # TRAINING RUN
 # =============================================================================
 EPOCHS=50
-BATCH_SIZE=32                # per-GPU batch (tăng GRAD_ACCUM_STEPS để bù)
+BATCH_SIZE=16                # per-GPU batch (tăng GRAD_ACCUM_STEPS để bù)
 GRAD_ACCUM_STEPS=4          # effective batch = BATCH_SIZE × GRAD_ACCUM_STEPS = 64
-NUM_WORKERS=8               # giảm worker tránh "Too many open files"
+NUM_WORKERS=4               # giảm worker tránh "Too many open files"
 AMP=false                    # true = FP16 mixed precision
 TENSORBOARD=true
 DEVICE="cuda"               # cuda | cpu | mps
