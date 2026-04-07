@@ -81,3 +81,15 @@ def get_param_dict(args: Any, model_without_ddp: nn.Module) -> List[Dict[str, An
     )
 
     return final_param_dicts
+
+
+def append_prototype_memory_param_groups(
+    param_dicts: List[Dict[str, Any]], criterion: Any, lr: float
+) -> None:
+    """Add learnable parameters from ``criterion.prototype_memory`` (e.g. per-class log τ)."""
+    pm = getattr(criterion, "prototype_memory", None)
+    if pm is None:
+        return
+    for p in pm.parameters():
+        if p.requires_grad:
+            param_dicts.append({"params": p, "lr": lr})

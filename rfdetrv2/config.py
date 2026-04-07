@@ -25,7 +25,7 @@ class ModelConfig(BaseModel):
     out_feature_indexes: List[int]
     dec_layers: int
     two_stage: bool = True
-    projector_scale: List[Literal["P3", "P4", "P5"]]
+    projector_scale: List[Literal["P3", "P4", "P5", "P6"]]
     hidden_dim: int
     patch_size: int
     num_windows: int
@@ -57,6 +57,14 @@ class ModelConfig(BaseModel):
     cpfe_use_sdg: bool = True    # Spectral Decomposition Gate (Center-Surround)
     cpfe_use_dn: bool = True     # Divisive Normalization (Lateral Inhibition)
     cpfe_use_tpr: bool = True    # Top-Down Predictive Refinement (Cortical Feedback)
+    # LW-DETR++ optional stack (virtual FPN neck, scale-aware RoPE, enhanced prototypes)
+    use_virtual_fpn_projector: bool = False  # True → MultiDilationP4Projector; needs P3–P5 or P3–P6
+    use_scale_aware_rope: bool = False       # True → ScaleAwareRoPE2D (hidden_dim % 8 == 0)
+    enhanced_prototype_memory: bool = False  # True → EnhancedPrototypeMemory
+    prototype_repulsion_margin: float = 0.0
+    prototype_use_adaptive_temp: bool = True
+    prototype_use_dual_proto: bool = True
+    prototype_hard_neg_k: int = 5
 
     @field_validator("pretrain_weights", "pretrained_encoder", mode="after")
     @classmethod
@@ -88,7 +96,7 @@ class RFDETRV2NanoConfig(ModelConfig):
     dec_n_points: int = 8
     num_queries: int = 300
     num_select: int = 300
-    projector_scale: List[Literal["P3", "P4", "P5"]] = ["P3", "P4", "P5"]
+    projector_scale: List[Literal["P3", "P4", "P5", "P6"]] = ["P3", "P4", "P5"]
     out_feature_indexes: List[int] = [2, 5, 8, 11]
     pretrain_weights: Optional[str] = None
     resolution: int = 384
@@ -111,7 +119,7 @@ class RFDETRV2BaseConfig(ModelConfig):
     num_queries: int = 300
     num_select: int = 300
     # num_classes: int = 80
-    projector_scale: List[Literal["P3", "P4", "P5"]] = ["P3", "P4", "P5"]
+    projector_scale: List[Literal["P3", "P4", "P5", "P6"]] = ["P3", "P4", "P5"]
     out_feature_indexes: List[int] = [2, 5, 8, 11]
     pretrain_weights: Optional[str] = None
     resolution: int = 560
@@ -134,7 +142,7 @@ class RFDETRV2SmallConfig(ModelConfig):
     dec_n_points: int = 8
     num_queries: int = 300
     num_select: int = 300
-    projector_scale: List[Literal["P3", "P4", "P5"]] = ["P3", "P4", "P5"]
+    projector_scale: List[Literal["P3", "P4", "P5", "P6"]] = ["P3", "P4", "P5"]
     out_feature_indexes: List[int] = [2, 5, 8, 11]
 
     resolution: int = 512
@@ -175,7 +183,7 @@ class RFDETRV2LargeConfig(ModelConfig):
     num_queries: int = 300
     num_select: int = 300
     # num_classes: int = 80
-    projector_scale: List[Literal["P3", "P4", "P5"]] = ["P3", "P4", "P5"]
+    projector_scale: List[Literal["P3", "P4", "P5", "P6"]] = ["P3", "P4", "P5"]
     out_feature_indexes: List[int] = [2, 5, 8, 11]
     pretrain_weights: Optional[str] = None
     resolution: int = 640

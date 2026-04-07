@@ -80,6 +80,7 @@ def build_backbone(
     cpfe_use_sdg=True,
     cpfe_use_dn=True,
     cpfe_use_tpr=True,
+    use_virtual_fpn_projector=False,
     # Legacy / ignored kwargs
     force_no_pretrain=False,
     **_ignored,
@@ -112,6 +113,7 @@ def build_backbone(
         cpfe_use_sdg=cpfe_use_sdg,
         cpfe_use_dn=cpfe_use_dn,
         cpfe_use_tpr=cpfe_use_tpr,
+        use_virtual_fpn_projector=use_virtual_fpn_projector,
     )
 
     return Joiner(backbone, position_embedding)

@@ -92,6 +92,44 @@ def _build_parser() -> argparse.ArgumentParser:
     model.add_argument("--use-windowed-attn",    action="store_true")
     model.add_argument("--no-convnext-projector", action="store_true")
     model.add_argument("--freeze-encoder",        action="store_true")
+    model.add_argument(
+        "--projector-includes-p6",
+        action="store_true",
+        help="Use projector_scale P3–P6 (e.g. with virtual FPN + extra MSDeform level).",
+    )
+
+    lwdetr_pp = p.add_argument_group(
+        "LW-DETR++ — virtual FPN neck, scale-aware RoPE, enhanced prototype memory"
+    )
+    lwdetr_pp.add_argument(
+        "--use-virtual-fpn-projector",
+        action="store_true",
+        help="Multi-dilation P4 fuse + lightweight virtual FPN (keep projector_scale P3–P5 or P3–P6).",
+    )
+    lwdetr_pp.add_argument(
+        "--use-scale-aware-rope",
+        action="store_true",
+        help="Decoder self-attn RoPE over cx,cy and log w,h (hidden_dim divisible by 8).",
+    )
+    lwdetr_pp.add_argument(
+        "--enhanced-prototype-memory",
+        action="store_true",
+        help="Adaptive τ, dual/shadow prototypes, hinge repulsion, hard-negative weighting.",
+    )
+    lwdetr_pp.add_argument("--prototype-repulsion-margin", type=float, default=0.0)
+    lwdetr_pp.add_argument(
+        "--no-prototype-use-adaptive-temp",
+        action="store_false",
+        dest="prototype_use_adaptive_temp",
+        default=True,
+    )
+    lwdetr_pp.add_argument(
+        "--no-prototype-use-dual-proto",
+        action="store_false",
+        dest="prototype_use_dual_proto",
+        default=True,
+    )
+    lwdetr_pp.add_argument("--prototype-hard-neg-k", type=int, default=5)
 
     cpfe = p.add_argument_group("CPFE — Cortical Perceptual Feature Enhancement")
     cpfe.add_argument("--no-cpfe",     action="store_false", dest="use_cpfe",     help="Disable CPFE module entirely")
@@ -153,7 +191,16 @@ def main() -> None:
         cpfe_use_sdg=args.cpfe_use_sdg,
         cpfe_use_dn=args.cpfe_use_dn,
         cpfe_use_tpr=args.cpfe_use_tpr,
+        use_virtual_fpn_projector=args.use_virtual_fpn_projector,
+        use_scale_aware_rope=args.use_scale_aware_rope,
+        enhanced_prototype_memory=args.enhanced_prototype_memory,
+        prototype_repulsion_margin=args.prototype_repulsion_margin,
+        prototype_use_adaptive_temp=args.prototype_use_adaptive_temp,
+        prototype_use_dual_proto=args.prototype_use_dual_proto,
+        prototype_hard_neg_k=args.prototype_hard_neg_k,
     )
+    if args.projector_includes_p6:
+        model_kw["projector_scale"] = ["P3", "P4", "P5", "P6"]
     model = _MODELS[args.model_size](**model_kw)
 
     coco_path = args.dataset_dir if args.dataset_file == "coco" else None

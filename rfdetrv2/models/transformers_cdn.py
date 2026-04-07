@@ -109,6 +109,60 @@ class RoPE2D(nn.Module):
         return q_rot, k_rot
 
 
+class ScaleAwareRoPE2D(nn.Module):
+    """2D RoPE extended with log-scale bands (cx, cy, log_w, log_h).
+
+    Dim layout (D divisible by 8): each quarter uses D//8 frequency bands.
+    """
+
+    def __init__(self, dim: int, max_freq: float = 10000.0, scale_max_freq: float = 100.0):
+        super().__init__()
+        assert dim % 8 == 0, (
+            f"ScaleAwareRoPE2D requires dim divisible by 8, got dim={dim}."
+        )
+        eighth = dim // 8
+        pos_freqs = 1.0 / (max_freq ** (torch.arange(0, eighth, dtype=torch.float32) / eighth))
+        scale_freqs = 1.0 / (scale_max_freq ** (torch.arange(0, eighth, dtype=torch.float32) / eighth))
+        self.register_buffer("pos_freqs", pos_freqs)
+        self.register_buffer("scale_freqs", scale_freqs)
+        self.dim = dim
+
+    def _rotate_half(self, x: torch.Tensor) -> torch.Tensor:
+        x1 = x[..., 0::2]
+        x2 = x[..., 1::2]
+        return torch.stack([-x2, x1], dim=-1).flatten(-2)
+
+    def _make_cos_sin(
+        self, coord: torch.Tensor, freqs: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        angle = 2 * math.pi * coord.unsqueeze(-1) * freqs.to(coord.device)
+        cos = angle.cos().repeat_interleave(2, dim=-1)
+        sin = angle.sin().repeat_interleave(2, dim=-1)
+        return cos, sin
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        boxes: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        cx, cy = boxes[..., 0], boxes[..., 1]
+        lw = boxes[..., 2].clamp(min=1e-4).log().clamp(-4.0, 0.0) / 4.0
+        lh = boxes[..., 3].clamp(min=1e-4).log().clamp(-4.0, 0.0) / 4.0
+
+        cos_cx, sin_cx = self._make_cos_sin(cx, self.pos_freqs)
+        cos_cy, sin_cy = self._make_cos_sin(cy, self.pos_freqs)
+        cos_lw, sin_lw = self._make_cos_sin(lw, self.scale_freqs)
+        cos_lh, sin_lh = self._make_cos_sin(lh, self.scale_freqs)
+
+        cos = torch.cat([cos_cx, cos_cy, cos_lw, cos_lh], dim=-1)
+        sin = torch.cat([sin_cx, sin_cy, sin_lw, sin_lh], dim=-1)
+
+        q_rot = q * cos + self._rotate_half(q) * sin
+        k_rot = k * cos + self._rotate_half(k) * sin
+        return q_rot, k_rot
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -213,7 +267,8 @@ class Transformer(nn.Module):
                  lite_refpoint_refine=False,
                  decoder_norm_type='LN',
                  bbox_reparam=False,
-                 use_rope=True):
+                 use_rope=True,
+                 use_scale_aware_rope=False):
         super().__init__()
         self.encoder = None
 
@@ -225,6 +280,7 @@ class Transformer(nn.Module):
             dec_n_points=dec_n_points,
             skip_self_attn=False,
             use_rope=use_rope,
+            use_scale_aware_rope=use_scale_aware_rope,
         )
         assert decoder_norm_type in ['LN', 'Identity']
         norm = {
@@ -505,7 +561,8 @@ class TransformerDecoderLayer(nn.Module):
     def __init__(self, d_model, sa_nhead, ca_nhead, dim_feedforward=2048, dropout=0.1,
                  activation="relu", normalize_before=False, group_detr=1,
                  num_feature_levels=4, dec_n_points=4, skip_self_attn=False,
-                 use_rope: bool = True):
+                 use_rope: bool = True,
+                 use_scale_aware_rope: bool = False):
         super().__init__()
         self.self_attn  = nn.MultiheadAttention(d_model, sa_nhead, dropout=dropout, batch_first=True)
         self.dropout1   = nn.Dropout(dropout)
@@ -525,8 +582,15 @@ class TransformerDecoderLayer(nn.Module):
         self.group_detr = group_detr
 
         # RoPE 2D cho self-attention only
-        # rope_ca đã được xóa — cross-attention dùng with_pos_embed như gốc
-        self.rope = RoPE2D(d_model) if use_rope else None
+        if use_rope:
+            if use_scale_aware_rope and d_model % 8 == 0:
+                self.rope = ScaleAwareRoPE2D(d_model)
+            elif d_model % 4 == 0:
+                self.rope = RoPE2D(d_model)
+            else:
+                self.rope = None
+        else:
+            self.rope = None
 
     def with_pos_embed(self, tensor, pos):
         return tensor if pos is None else tensor + pos
@@ -648,6 +712,7 @@ def build_transformer(args):
         decoder_norm_type=args.decoder_norm,
         bbox_reparam=args.bbox_reparam,
         use_rope=getattr(args, "use_rope", True),
+        use_scale_aware_rope=getattr(args, "use_scale_aware_rope", False),
     )
 
 

@@ -24,7 +24,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from rfdetrv2.models.backbone.base import BackboneBase
-from rfdetrv2.models.backbone.convnext_projector import MultiScaleProjector
+from rfdetrv2.models.backbone.convnext_projector import (
+    MultiDilationP4Projector,
+    MultiScaleProjector,
+)
 from rfdetrv2.models.backbone.cpfe import CorticalPerceptualFeatureEnhancement
 from rfdetrv2.models.backbone.dinov3 import DinoV3
 from rfdetrv2.util.misc import NestedTensor
@@ -80,6 +83,7 @@ class Backbone(BackboneBase):
         cpfe_use_sdg: bool = True,
         cpfe_use_dn: bool = True,
         cpfe_use_tpr: bool = True,
+        use_virtual_fpn_projector: bool = False,
     ):
         super().__init__()
 
@@ -139,14 +143,40 @@ class Backbone(BackboneBase):
         level2scalefactor = dict(P3=2.0, P4=1.0, P5=0.5, P6=0.25)
         scale_factors = [level2scalefactor[lvl] for lvl in self.projector_scale]
 
-        self.projector = MultiScaleProjector(
-            in_channels=self.encoder._out_feature_channels,
-            out_channels=out_channels,
-            scale_factors=scale_factors,
-            layer_norm=layer_norm,
-            rms_norm=rms_norm,
-            use_convnext=use_convnext_projector,
-        )
+        self.use_virtual_fpn_projector = bool(use_virtual_fpn_projector)
+        if self.use_virtual_fpn_projector:
+            ps = self.projector_scale
+            if ps not in (["P3", "P4", "P5"], ["P3", "P4", "P5", "P6"]):
+                raise ValueError(
+                    "use_virtual_fpn_projector=True requires projector_scale "
+                    "['P3','P4','P5'] or ['P3','P4','P5','P6']."
+                )
+            with_p6 = "P6" in ps
+            if not use_convnext_projector:
+                logger.warning(
+                    "use_virtual_fpn_projector ignores no_convnext_projector; "
+                    "MultiDilation path always uses ConvNeXt-style fusion."
+                )
+            self.projector = MultiDilationP4Projector(
+                in_channels=self.encoder._out_feature_channels,
+                out_channels=out_channels,
+                num_blocks=4,
+                dilations=(1, 3, 5),
+                with_p6=with_p6,
+            )
+            logger.info(
+                "Virtual FPN projector (multi-dilation P4 fuse → P3/P4/P5%s).",
+                " + P6" if with_p6 else "",
+            )
+        else:
+            self.projector = MultiScaleProjector(
+                in_channels=self.encoder._out_feature_channels,
+                out_channels=out_channels,
+                scale_factors=scale_factors,
+                layer_norm=layer_norm,
+                rms_norm=rms_norm,
+                use_convnext=use_convnext_projector,
+            )
 
         # ------------------------------------------------------------------
         # CPFE — Cortical Perceptual Feature Enhancement

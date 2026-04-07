@@ -17,7 +17,7 @@ from rfdetrv2.models.backbone import build_backbone
 from rfdetrv2.models.criterion import SetCriterion
 from rfdetrv2.models.detector import LWDETR, PostProcess
 from rfdetrv2.models.matcher import build_matcher
-from rfdetrv2.models.prototype_memory import PrototypeMemory
+from rfdetrv2.models.prototype_memory import EnhancedPrototypeMemory, PrototypeMemory
 from rfdetrv2.models.segmentation_head import SegmentationHead
 from rfdetrv2.models.transformers_cdn import build_transformer
 
@@ -60,6 +60,7 @@ def build_model(args):
         cpfe_use_sdg=getattr(args, "cpfe_use_sdg", True),
         cpfe_use_dn=getattr(args, "cpfe_use_dn", True),
         cpfe_use_tpr=getattr(args, "cpfe_use_tpr", True),
+        use_virtual_fpn_projector=getattr(args, "use_virtual_fpn_projector", False),
     )
 
     if args.encoder_only:
@@ -114,7 +115,7 @@ def build_criterion_and_postprocessors(args):
         proto_coef = getattr(args, "prototype_loss_coef", 0.1)
         weight_dict["loss_proto_align"] = proto_coef
 
-        prototype_memory = PrototypeMemory(
+        proto_kw = dict(
             num_classes        = args.num_classes,
             feat_dim           = args.hidden_dim,
             momentum           = getattr(args, "prototype_momentum",           0.999),
@@ -124,7 +125,17 @@ def build_criterion_and_postprocessors(args):
             use_freq_weight    = getattr(args, "prototype_use_freq_weight",    True),
             use_quality_weight = getattr(args, "prototype_use_quality_weight", True),
             use_repulsion      = getattr(args, "prototype_use_repulsion",      True),
-        ).to(device)
+        )
+        if getattr(args, "enhanced_prototype_memory", False):
+            prototype_memory = EnhancedPrototypeMemory(
+                **proto_kw,
+                repulsion_margin=getattr(args, "prototype_repulsion_margin", 0.0),
+                use_adaptive_temp=getattr(args, "prototype_use_adaptive_temp", True),
+                use_dual_proto=getattr(args, "prototype_use_dual_proto", True),
+                hard_neg_k=getattr(args, "prototype_hard_neg_k", 5),
+            ).to(device)
+        else:
+            prototype_memory = PrototypeMemory(**proto_kw).to(device)
 
     # ------------------------------------------------------------------
     # Aux-loss weight expansion

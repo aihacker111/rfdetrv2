@@ -125,6 +125,25 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no_cpfe_dn",      action="store_false", dest="cpfe_use_dn")
     parser.add_argument("--no_cpfe_tpr",     action="store_false", dest="cpfe_use_tpr")
 
+    # LW-DETR++ — virtual FPN neck, scale-aware RoPE, enhanced prototype memory
+    parser.add_argument("--use_virtual_fpn_projector", action="store_true")
+    parser.add_argument("--use_scale_aware_rope",      action="store_true")
+    parser.add_argument("--enhanced_prototype_memory", action="store_true")
+    parser.add_argument("--prototype_repulsion_margin", default=0.0, type=float)
+    parser.add_argument(
+        "--no_prototype_use_adaptive_temp",
+        action="store_false",
+        dest="prototype_use_adaptive_temp",
+        default=True,
+    )
+    parser.add_argument(
+        "--no_prototype_use_dual_proto",
+        action="store_false",
+        dest="prototype_use_dual_proto",
+        default=True,
+    )
+    parser.add_argument("--prototype_hard_neg_k", default=5, type=int)
+
     # Dataset
     parser.add_argument("--dataset_file",         default="coco")
     parser.add_argument("--coco_path",            type=str)
@@ -328,6 +347,14 @@ def populate_args(
     cpfe_use_sdg=True,
     cpfe_use_dn=True,
     cpfe_use_tpr=True,
+    # --- LW-DETR++ ---
+    use_virtual_fpn_projector=False,
+    use_scale_aware_rope=False,
+    enhanced_prototype_memory=False,
+    prototype_repulsion_margin=0.0,
+    prototype_use_adaptive_temp=True,
+    prototype_use_dual_proto=True,
+    prototype_hard_neg_k=5,
     # --- Misc ---
     subcommand=None,
     **extra_kwargs,
@@ -471,6 +498,13 @@ def populate_args(
         cpfe_use_sdg=cpfe_use_sdg,
         cpfe_use_dn=cpfe_use_dn,
         cpfe_use_tpr=cpfe_use_tpr,
+        use_virtual_fpn_projector=use_virtual_fpn_projector,
+        use_scale_aware_rope=use_scale_aware_rope,
+        enhanced_prototype_memory=enhanced_prototype_memory,
+        prototype_repulsion_margin=prototype_repulsion_margin,
+        prototype_use_adaptive_temp=prototype_use_adaptive_temp,
+        prototype_use_dual_proto=prototype_use_dual_proto,
+        prototype_hard_neg_k=prototype_hard_neg_k,
         subcommand=subcommand,
         **extra_kwargs,
     )

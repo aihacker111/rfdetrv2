@@ -36,10 +36,25 @@ FREEZE_ENCODER=false        # true = đóng băng DINOv3 backbone
 # =============================================================================
 # CPFE — Cortical Perceptual Feature Enhancement
 # =============================================================================
-USE_CPFE=true               # master toggle — false = tắt toàn bộ CPFE
-CPFE_USE_SDG=true           # Spectral Decomposition Gate (Center-Surround)
-CPFE_USE_DN=true            # Divisive Normalization (Lateral Inhibition)
-CPFE_USE_TPR=true           # Top-Down Predictive Refinement (Cortical Feedback)
+USE_CPFE=False               # master toggle — false = tắt toàn bộ CPFE
+CPFE_USE_SDG=False           # Spectral Decomposition Gate (Center-Surround)
+CPFE_USE_DN=False            # Divisive Normalization (Lateral Inhibition)
+CPFE_USE_TPR=False           # Top-Down Predictive Refinement (Cortical Feedback)
+
+# =============================================================================
+# LW-DETR++ — virtual FPN neck, scale-aware RoPE, enhanced prototype memory
+# =============================================================================
+# Virtual FPN: backbone vẫn chỉ cần một lưới P4 (cùng H×W); projector_scale
+# ['P3','P4','P5'] (hoặc thêm P6) là tên các mức ảo cho MSDeformAttn — không
+# phải “chạy backbone 3 lần”.
+USE_VIRTUAL_FPN_PROJECTOR=true   # true = MultiDilationP4Projector
+PROJECTOR_INCLUDES_P6=true       # true → projector_scale P3–P6 (thêm mức coarse)
+USE_SCALE_AWARE_ROPE=true      # true = RoPE 2D + log(w,h) ở decoder self-attn
+ENHANCED_PROTOTYPE_MEMORY=true # true = EnhancedPrototypeMemory (τ/lớp, hard-neg, …)
+PROTOTYPE_REPULSION_MARGIN=0.0
+PROTOTYPE_USE_ADAPTIVE_TEMP=true
+PROTOTYPE_USE_DUAL_PROTO=true
+PROTOTYPE_HARD_NEG_K=5
 
 # =============================================================================
 # TRAINING RUN
@@ -48,7 +63,7 @@ EPOCHS=50
 BATCH_SIZE=32                # per-GPU batch (tăng GRAD_ACCUM_STEPS để bù)
 GRAD_ACCUM_STEPS=4          # effective batch = BATCH_SIZE × GRAD_ACCUM_STEPS = 64
 NUM_WORKERS=4               # giảm worker tránh "Too many open files"
-AMP=true                    # true = FP16 mixed precision
+AMP=false                    # true = FP16 mixed precision
 TENSORBOARD=true
 DEVICE="cuda"               # cuda | cpu | mps
 DEBUG_DATA_LIMIT=0          # 0 = full dataset; N > 0 = chỉ dùng N ảnh (smoke test)
@@ -172,6 +187,28 @@ if [ "${CPFE_USE_TPR}" = "false" ]; then
     set -- "$@" --no-cpfe-tpr
 fi
 
+# LW-DETR++
+if [ "${USE_VIRTUAL_FPN_PROJECTOR}" = "true" ]; then
+    set -- "$@" --use-virtual-fpn-projector
+fi
+if [ "${PROJECTOR_INCLUDES_P6}" = "true" ]; then
+    set -- "$@" --projector-includes-p6
+fi
+if [ "${USE_SCALE_AWARE_ROPE}" = "true" ]; then
+    set -- "$@" --use-scale-aware-rope
+fi
+if [ "${ENHANCED_PROTOTYPE_MEMORY}" = "true" ]; then
+    set -- "$@" --enhanced-prototype-memory
+fi
+set -- "$@" --prototype-repulsion-margin "${PROTOTYPE_REPULSION_MARGIN}"
+set -- "$@" --prototype-hard-neg-k "${PROTOTYPE_HARD_NEG_K}"
+if [ "${PROTOTYPE_USE_ADAPTIVE_TEMP}" = "false" ]; then
+    set -- "$@" --no-prototype-use-adaptive-temp
+fi
+if [ "${PROTOTYPE_USE_DUAL_PROTO}" = "false" ]; then
+    set -- "$@" --no-prototype-use-dual-proto
+fi
+
 # Debug limit
 if [ "${DEBUG_DATA_LIMIT}" -gt 0 ] 2>/dev/null; then
     set -- "$@" --debug-data-limit "${DEBUG_DATA_LIMIT}"
@@ -186,6 +223,7 @@ ulimit -n 65536 2>/dev/null || true
 echo "============================================================"
 echo "  RF-DETR v2 Training (from scratch)"
 echo "  Model   : ${MODEL_SIZE}  |  Epochs: ${EPOCHS}  |  BS: ${BATCH_SIZE}x${GRAD_ACCUM_STEPS}  |  CPFE: ${USE_CPFE}"
+echo "  LW++    : vFPN=${USE_VIRTUAL_FPN_PROJECTOR}  P6=${PROJECTOR_INCLUDES_P6}  RoPE=${USE_SCALE_AWARE_ROPE}  EProto=${ENHANCED_PROTOTYPE_MEMORY}"
 echo "  Dataset : ${DATASET_DIR}"
 echo "  Output  : ${OUTPUT_DIR}"
 echo "  GPU     : CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"

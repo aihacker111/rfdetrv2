@@ -14,4 +14,4 @@ Primary imports (prefer these in new code):
 from rfdetrv2.models.builder import build_criterion_and_postprocessors, build_model
 from rfdetrv2.models.criterion import SetCriterion
 from rfdetrv2.models.detector import LWDETR, MLP, PostProcess
-from rfdetrv2.models.prototype_memory import PrototypeMemory
+from rfdetrv2.models.prototype_memory import EnhancedPrototypeMemory, PrototypeMemory

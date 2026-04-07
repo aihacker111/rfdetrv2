@@ -41,7 +41,7 @@ from rfdetrv2.core import evaluate, train_one_epoch
 from rfdetrv2.models import PostProcess, build_criterion_and_postprocessors, build_model
 from rfdetrv2.util.benchmark import benchmark
 from rfdetrv2.util.drop_scheduler import drop_scheduler
-from rfdetrv2.util.get_param_dicts import get_param_dict
+from rfdetrv2.util.get_param_dicts import append_prototype_memory_param_groups, get_param_dict
 from rfdetrv2.util.utils import BestMetricHolder, ModelEma, clean_state_dict
 
 if str(os.environ.get("USE_FILE_SYSTEM_SHARING", "False")).lower() in ["true", "1"]:
@@ -213,6 +213,7 @@ class Model:
                 print(f"Multi-GPU LR scaled ×{scale:.3f} → lr={args.lr:.2e}, lr_encoder={args.lr_encoder:.2e}")
 
         param_dicts = [p for p in get_param_dict(args, model_without_ddp) if p["params"].requires_grad]
+        append_prototype_memory_param_groups(param_dicts, criterion, args.lr)
         optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
         dataset_train = build_dataset("train", args=args, resolution=args.resolution)

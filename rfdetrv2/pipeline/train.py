@@ -46,7 +46,7 @@ from rfdetrv2.datasets import build_dataset, get_coco_api_from_dataset
 from rfdetrv2.models import PostProcess, build_criterion_and_postprocessors
 from rfdetrv2.pipeline.base import BasePipeline
 from rfdetrv2.util.drop_scheduler import drop_scheduler
-from rfdetrv2.util.get_param_dicts import get_param_dict
+from rfdetrv2.util.get_param_dicts import append_prototype_memory_param_groups, get_param_dict
 from rfdetrv2.util.utils import BestMetricHolder, ModelEma, clean_state_dict
 
 logger = getLogger(__name__)
@@ -117,7 +117,7 @@ class TrainingPipeline(BasePipeline):
 
         self._scale_lr_for_multi_gpu(args)
 
-        optimizer = self._build_optimizer(args, model_without_ddp)
+        optimizer = self._build_optimizer(args, model_without_ddp, criterion)
         data_loaders = self._build_data_loaders(args, extra_kwargs)
         lr_scheduler = self._build_lr_scheduler(optimizer, args, len(data_loaders["train"].dataset))
 
@@ -306,9 +306,10 @@ class TrainingPipeline(BasePipeline):
 
         return populate_args(**merged)
 
-    def _build_optimizer(self, args, model_without_ddp):
+    def _build_optimizer(self, args, model_without_ddp, criterion):
         param_dicts = get_param_dict(args, model_without_ddp)
         param_dicts = [p for p in param_dicts if p["params"].requires_grad]
+        append_prototype_memory_param_groups(param_dicts, criterion, args.lr)
         return torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
 
     def _build_lr_scheduler(self, optimizer, args, n_train_samples: int):

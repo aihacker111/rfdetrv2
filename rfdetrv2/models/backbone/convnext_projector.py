@@ -179,6 +179,137 @@ class SwiGLU(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Multi-dilation P4-only projector (virtual FPN)
+# ---------------------------------------------------------------------------
+
+class MultiDilationConvNeXtBlock(nn.Module):
+    """ConvNeXt block with parallel dilated depthwise branches (d=1,3,5) + fuse.
+
+    Replaces a single 7×7 dw conv when using the virtual-FPN path: multi-scale
+    receptive field on one spatial grid before light upsample/downsample to P3/P5.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        dilations: tuple = (1, 3, 5),
+        expand_ratio: float = 8 / 3,
+        layer_scale_init: float = 1e-6,
+    ):
+        super().__init__()
+        k = 7
+        self.branches = nn.ModuleList([
+            nn.Conv2d(
+                dim, dim, kernel_size=k,
+                padding=d * (k - 1) // 2,
+                dilation=d, groups=dim, bias=False,
+            )
+            for d in dilations
+        ])
+        n = len(dilations)
+        self.gate = nn.Sequential(
+            nn.Conv2d(dim * n, dim, kernel_size=1, bias=False),
+            LayerNorm(dim),
+        )
+        self.norm = nn.LayerNorm(dim, eps=1e-6)
+        self.ffn = SwiGLU(dim, expand_ratio=expand_ratio)
+        self.gamma = (
+            nn.Parameter(layer_scale_init * torch.ones(dim))
+            if layer_scale_init > 0 else None
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        merged = torch.cat([b(x) for b in self.branches], dim=1)
+        x = self.gate(merged)
+        x = x.permute(0, 2, 3, 1)
+        x = self.ffn(self.norm(x))
+        if self.gamma is not None:
+            x = self.gamma * x
+        x = x.permute(0, 3, 1, 2)
+        return residual + x
+
+
+class MultiDilationFusion(nn.Module):
+    """Like ConvNeXtFusion but stacks MultiDilationConvNeXtBlock."""
+
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        num_blocks: int = 3,
+        dilations: tuple = (1, 3, 5),
+        expand_ratio: float = 8 / 3,
+        layer_scale_init: float = 1e-6,
+    ):
+        super().__init__()
+        self.proj = nn.Conv2d(in_dim, out_dim, 1, bias=False)
+        self.norm0 = LayerNorm(out_dim)
+        self.blocks = nn.Sequential(*[
+            MultiDilationConvNeXtBlock(
+                out_dim,
+                dilations=dilations,
+                expand_ratio=expand_ratio,
+                layer_scale_init=layer_scale_init,
+            )
+            for _ in range(num_blocks)
+        ])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.blocks(self.norm0(self.proj(x)))
+
+
+class MultiDilationP4Projector(nn.Module):
+    """P4-centric fusion + virtual FPN: one heavy fusion on native H×W, then P3/P5 via cheap ops.
+
+    Outputs the same number of maps as a standard P3–P4–P5 (optional P6) stack for MSDeformAttn.
+    """
+
+    def __init__(
+        self,
+        in_channels: list,
+        out_channels: int,
+        num_blocks: int = 4,
+        dilations: tuple = (1, 3, 5),
+        expand_ratio: float = 8 / 3,
+        layer_scale_init: float = 1e-6,
+        with_p6: bool = False,
+    ):
+        super().__init__()
+        self.with_p6 = with_p6
+        fused_dim = sum(in_channels)
+        self.fusion = MultiDilationFusion(
+            in_dim=fused_dim,
+            out_dim=out_channels,
+            num_blocks=num_blocks,
+            dilations=dilations,
+            expand_ratio=expand_ratio,
+            layer_scale_init=layer_scale_init,
+        )
+        self.to_p3 = nn.Sequential(
+            nn.ConvTranspose2d(out_channels, out_channels, kernel_size=2, stride=2),
+            LayerNorm(out_channels),
+            nn.GELU(),
+        )
+        self.to_p5 = nn.Sequential(
+            nn.Conv2d(
+                out_channels, out_channels, kernel_size=3, stride=2,
+                padding=1, groups=out_channels, bias=False,
+            ),
+            LayerNorm(out_channels),
+            nn.GELU(),
+        )
+
+    def forward(self, x: list[torch.Tensor]) -> list[torch.Tensor]:
+        fused = torch.cat(x, dim=1)
+        p4 = self.fusion(fused)
+        results = [self.to_p3(p4), p4, self.to_p5(p4)]
+        if self.with_p6:
+            results.append(F.max_pool2d(results[-1], kernel_size=2, stride=2))
+        return results
+
+
+# ---------------------------------------------------------------------------
 # ConvNeXtBlock  [FIX-1, FIX-2, FIX-3, FIX-4]
 # ---------------------------------------------------------------------------
 
