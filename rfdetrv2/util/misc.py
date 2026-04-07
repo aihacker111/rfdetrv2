@@ -414,6 +414,24 @@ def get_rank():
     return dist.get_rank()
 
 
+def count_parameters(module: torch.nn.Module) -> Tuple[int, int]:
+    """Return ``(total_numel, trainable_numel)`` for all parameters in ``module``."""
+    total = sum(p.numel() for p in module.parameters())
+    trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
+    return total, trainable
+
+
+def format_param_count(n: int) -> str:
+    """Compact string for parameter counts (e.g. ``\"31.246M\"``)."""
+    if n >= 1_000_000_000:
+        return f"{n / 1e9:.3f}B"
+    if n >= 1_000_000:
+        return f"{n / 1e6:.3f}M"
+    if n >= 1_000:
+        return f"{n / 1e3:.3f}K"
+    return str(int(n))
+
+
 def is_main_process():
     return get_rank() == 0
 

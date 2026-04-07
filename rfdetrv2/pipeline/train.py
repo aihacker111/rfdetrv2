@@ -112,8 +112,16 @@ class TrainingPipeline(BasePipeline):
         model = self.model.to(self.device)
         model, model_without_ddp = self._wrap_ddp(model, args)
 
-        n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        logger.info("Trainable parameters: %d", n_params)
+        n_total, n_params = utils.count_parameters(model)
+        n_frozen = n_total - n_params
+        if utils.is_main_process():
+            param_msg = (
+                f"Model parameters: total={n_total:,} ({utils.format_param_count(n_total)}), "
+                f"trainable={n_params:,} ({utils.format_param_count(n_params)}), "
+                f"frozen={n_frozen:,} ({utils.format_param_count(n_frozen)})"
+            )
+            logger.info(param_msg)
+            print(param_msg, flush=True)
 
         self._scale_lr_for_multi_gpu(args)
 

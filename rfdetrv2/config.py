@@ -224,10 +224,10 @@ class TrainConfig(BaseModel):
     prototype_use_quality_weight: bool = True  # [ENH-4] Prototype quality weighting
     prototype_use_repulsion: bool = True   # [ENH-3] Toggle inter-class repulsion
     # CPFE — Cortical Perceptual Feature Enhancement
-    use_cpfe: bool = True        # master toggle
-    cpfe_use_sdg: bool = True    # Spectral Decomposition Gate (Center-Surround)
-    cpfe_use_dn: bool = True     # Divisive Normalization (Lateral Inhibition)
-    cpfe_use_tpr: bool = True    # Top-Down Predictive Refinement (Cortical Feedback)
+    use_cpfe: bool = False        # master toggle
+    cpfe_use_sdg: bool = False    # Spectral Decomposition Gate (Center-Surround)
+    cpfe_use_dn: bool = False     # Divisive Normalization (Lateral Inhibition)
+    cpfe_use_tpr: bool = False    # Top-Down Predictive Refinement (Cortical Feedback)
     dataset_file: Literal["coco", "o365", "roboflow"] = "roboflow"
     square_resize_div_64: bool = True
     dataset_dir: str  # COCO layout root (train/, val/, annotations/); also default for coco_path when unset

@@ -200,8 +200,15 @@ class Model:
             )
             model_without_ddp = model.module
 
-        n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"Trainable parameters: {n_params}")
+        n_total, n_params = utils.count_parameters(model)
+        n_frozen = n_total - n_params
+        if utils.is_main_process():
+            print(
+                f"Model parameters: total={n_total:,} ({utils.format_param_count(n_total)}), "
+                f"trainable={n_params:,} ({utils.format_param_count(n_params)}), "
+                f"frozen={n_frozen:,} ({utils.format_param_count(n_frozen)})",
+                flush=True,
+            )
 
         world_size = utils.get_world_size()
         if world_size > 1:
