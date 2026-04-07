@@ -20,7 +20,7 @@ cd "${REPO_ROOT}"
 # =============================================================================
 # PATHS — BẮT BUỘC chỉnh DATASET_DIR
 # =============================================================================
-DATASET_DIR="/data/coco"          # đường dẫn tới dataset (COCO layout)
+DATASET_DIR="/workspace/coco2017"          # đường dẫn tới dataset (COCO layout)
 OUTPUT_DIR="output/train"         # thư mục lưu checkpoint và log
 DATASET_FILE="coco"               # coco | roboflow | o365
 PRETRAINED_ENCODER=""             # đường dẫn .pth DINOv3 backbone (để trống = tự download HuggingFace)
