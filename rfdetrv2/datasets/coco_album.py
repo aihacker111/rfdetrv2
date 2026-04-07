@@ -15,6 +15,8 @@
 
 """
 COCO dataset which returns image_id for evaluation.
+
+Mostly copy-paste from https://github.com/pytorch/vision/blob/13b35ff/references/detection/coco_utils.py
 """
 import json
 import logging
@@ -27,31 +29,29 @@ import torch.utils.data
 import torchvision
 from PIL import Image
 
-import rfdetrv2.datasets.transform_album as T
+import rfdetrv2.datasets.transforms as T
 
 logger = logging.getLogger(__name__)
 
 
-def compute_multi_scale_scales(
-    resolution: int,
-    expanded_scales: bool = False,
-    patch_size: int = 16,
-    num_windows: int = 4,
-) -> List[int]:
+def compute_multi_scale_scales(resolution: int, expanded_scales: bool = False, patch_size: int = 16, num_windows: int = 4) -> List[int]:
+    # round to the nearest multiple of 4*patch_size to enable both patching and windowing
     base_num_patches_per_window = resolution // (patch_size * num_windows)
     offsets = [-3, -2, -1, 0, 1, 2, 3, 4] if not expanded_scales else [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5]
     scales = [base_num_patches_per_window + offset for offset in offsets]
     proposed_scales = [scale * patch_size * num_windows for scale in scales]
-    proposed_scales = [scale for scale in proposed_scales if scale >= patch_size * num_windows * 2]
+    proposed_scales = [scale for scale in proposed_scales if scale >= patch_size * num_windows * 2]  # ensure minimum image size
     return proposed_scales
 
 
-def convert_coco_poly_to_mask(
-    segmentations: List[Any], height: int, width: int
-) -> torch.Tensor:
+def convert_coco_poly_to_mask(segmentations: List[Any], height: int, width: int) -> torch.Tensor:
+    """Convert polygon segmentation to a binary mask tensor of shape [N, H, W].
+    Requires pycocotools.
+    """
     masks = []
     for polygons in segmentations:
         if polygons is None or len(polygons) == 0:
+            # empty segmentation for this instance
             masks.append(torch.zeros((height, width), dtype=torch.uint8))
             continue
         try:
@@ -70,16 +70,11 @@ def convert_coco_poly_to_mask(
 
 
 class CocoDetection(torchvision.datasets.CocoDetection):
-    def __init__(
-        self,
-        img_folder: Union[str, Path],
-        ann_file: Union[str, Path],
-        transforms: Optional[Any],
-        include_masks: bool = False,
-    ) -> None:
+    def __init__(self, img_folder: Union[str, Path], ann_file: Union[str, Path], transforms: Optional[Any], include_masks: bool = False) -> None:
         super(CocoDetection, self).__init__(img_folder, ann_file)
         self._transforms = transforms
         self.include_masks = include_masks
+        # Raw COCO category_id → contiguous 0..K-1 (SetCriterion / scatter expect this range).
         cat_ids = sorted(int(x) for x in self.coco.getCatIds())
         self._cat_id_to_label = {cid: i for i, cid in enumerate(cat_ids)}
         self.prepare = ConvertCoco(
@@ -115,15 +110,14 @@ class ConvertCoco(object):
         self.include_masks = include_masks
         self.valid_category_ids = valid_category_ids
 
-    def __call__(
-        self, image: Image.Image, target: Dict[str, Any]
-    ) -> Tuple[Image.Image, Dict[str, Any]]:
+    def __call__(self, image: Image.Image, target: Dict[str, Any]) -> Tuple[Image.Image, Dict[str, Any]]:
         w, h = image.size
 
         image_id = target["image_id"]
         image_id = torch.tensor([image_id])
 
         anno = target["annotations"]
+
         anno = [obj for obj in anno if 'iscrowd' not in obj or obj['iscrowd'] == 0]
         if self.valid_category_ids is not None:
             anno = [
@@ -146,6 +140,7 @@ class ConvertCoco(object):
             return image, target
 
         boxes = [obj["bbox"] for obj in anno]
+        # guard against no boxes via resizing
         boxes = torch.as_tensor(boxes, dtype=torch.float32).reshape(-1, 4)
         boxes[:, 2:] += boxes[:, :2]
         boxes[:, 0::2].clamp_(min=0, max=w)
@@ -163,11 +158,13 @@ class ConvertCoco(object):
         target["labels"] = classes
         target["image_id"] = image_id
 
+        # for conversion to coco api
         area = torch.tensor([obj["area"] for obj in anno])
         iscrowd = torch.tensor([obj["iscrowd"] if "iscrowd" in obj else 0 for obj in anno])
         target["area"] = area[keep]
         target["iscrowd"] = iscrowd[keep]
 
+        # add segmentation masks if requested, otherwise ensure consistent key when include_masks=True
         if self.include_masks:
             if len(anno) > 0 and 'segmentation' in anno[0]:
                 segmentations = [obj.get("segmentation", []) for obj in anno]
@@ -178,6 +175,7 @@ class ConvertCoco(object):
                     target["masks"] = torch.zeros((0, h, w), dtype=torch.uint8)
             else:
                 target["masks"] = torch.zeros((0, h, w), dtype=torch.uint8)
+
             target["masks"] = target["masks"].bool()
 
         target["orig_size"] = torch.as_tensor([int(h), int(w)])
@@ -186,16 +184,7 @@ class ConvertCoco(object):
         return image, target
 
 
-def make_coco_transforms(
-    image_set: str,
-    resolution: int,
-    multi_scale: bool = False,
-    expanded_scales: bool = False,
-    skip_random_resize: bool = False,
-    patch_size: int = 16,
-    num_windows: int = 4,
-    document_aug: bool = False,
-) -> T.Compose:
+def make_coco_transforms(image_set: str, resolution: int, multi_scale: bool = False, expanded_scales: bool = False, skip_random_resize: bool = False, patch_size: int = 16, num_windows: int = 4) -> T.Compose:
 
     normalize = T.Compose([
         T.ToTensor(),
@@ -204,13 +193,13 @@ def make_coco_transforms(
 
     scales = [resolution]
     if multi_scale:
+        # scales = [448, 512, 576, 640, 704, 768, 832, 896]
         scales = compute_multi_scale_scales(resolution, expanded_scales, patch_size, num_windows)
         if skip_random_resize:
             scales = [scales[-1]]
         print(scales)
 
     if image_set == 'train':
-        doc_aug = [T.DocumentAugmentation(apply_spatial=True, p=0.5)] if document_aug else []
         return T.Compose([
             T.RandomHorizontalFlip(),
             T.RandomSelect(
@@ -221,7 +210,6 @@ def make_coco_transforms(
                     T.RandomResize(scales, max_size=1333),
                 ])
             ),
-            *doc_aug,
             normalize,
         ])
 
@@ -239,31 +227,23 @@ def make_coco_transforms(
     raise ValueError(f'unknown {image_set}')
 
 
-def make_coco_transforms_square_div_64(
-    image_set: str,
-    resolution: int,
-    multi_scale: bool = False,
-    expanded_scales: bool = False,
-    skip_random_resize: bool = False,
-    patch_size: int = 16,
-    num_windows: int = 4,
-    document_aug: bool = False,
-) -> T.Compose:
+def make_coco_transforms_square_div_64(image_set: str, resolution: int, multi_scale: bool = False, expanded_scales: bool = False, skip_random_resize: bool = False, patch_size: int = 16, num_windows: int = 4) -> T.Compose:
 
     normalize = T.Compose([
         T.ToTensor(),
         T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
 
+
     scales = [resolution]
     if multi_scale:
+        # scales = [448, 512, 576, 640, 704, 768, 832, 896]
         scales = compute_multi_scale_scales(resolution, expanded_scales, patch_size, num_windows)
         if skip_random_resize:
             scales = [scales[-1]]
         print(scales)
 
     if image_set == 'train':
-        doc_aug = [T.DocumentAugmentation(apply_spatial=True, p=0.5)] if document_aug else []
         return T.Compose([
             T.RandomHorizontalFlip(),
             T.RandomSelect(
@@ -274,16 +254,24 @@ def make_coco_transforms_square_div_64(
                     T.SquareResize(scales),
                 ]),
             ),
-            *doc_aug,
             normalize,
         ])
 
     if image_set == 'val':
-        return T.Compose([T.SquareResize([resolution]), normalize])
+        return T.Compose([
+            T.SquareResize([resolution]),
+            normalize,
+        ])
     if image_set == 'test':
-        return T.Compose([T.SquareResize([resolution]), normalize])
+        return T.Compose([
+            T.SquareResize([resolution]),
+            normalize,
+        ])
     if image_set == 'val_speed':
-        return T.Compose([T.SquareResize([resolution]), normalize])
+        return T.Compose([
+            T.SquareResize([resolution]),
+            normalize,
+        ])
 
     raise ValueError(f'unknown {image_set}')
 
@@ -297,9 +285,11 @@ def _json_has_categories(path: Path) -> bool:
         return False
 
 
-def resolve_coco_annotation_path_for_categories(
-    root: Union[str, Path]
-) -> Optional[Path]:
+def resolve_coco_annotation_path_for_categories(root: Union[str, Path]) -> Optional[Path]:
+    """Find a COCO JSON that contains ``categories`` (train, val, or any split).
+
+    Used to infer class names and ``num_classes`` without hardcoding MS-COCO labels.
+    """
     root = Path(root)
     candidates = [
         root / "train" / "_annotations.coco.json",
@@ -323,6 +313,7 @@ def resolve_coco_annotation_path_for_categories(
 
 
 def resolve_coco_train_annotation_path(root: Union[str, Path]) -> Optional[Path]:
+    """Return a train-split COCO JSON path if it exists (narrower than categories resolver)."""
     root = Path(root)
     candidates = [
         root / "train" / "_annotations.coco.json",
@@ -338,6 +329,12 @@ def resolve_coco_train_annotation_path(root: Union[str, Path]) -> Optional[Path]
 def infer_coco_num_classes_and_names(
     root: Union[str, Path],
 ) -> Optional[Tuple[List[str], int, List[int]]]:
+    """Read categories from the train COCO JSON.
+
+    Returns ``(class_names, num_classes, label_to_cat_id)`` where ``num_classes`` is **K**
+    (the number of foreground classes). Training uses contiguous labels ``0..K-1`` via
+    :class:`CocoDetection`; ``label_to_cat_id[i]`` is the COCO ``category_id`` for index ``i``.
+    """
     ann_path = resolve_coco_annotation_path_for_categories(root)
     if ann_path is None:
         return None
@@ -359,6 +356,7 @@ def infer_coco_num_classes_and_names(
 
 
 def _resolve_build_coco_ann_and_images(root: Path, split: str) -> Tuple[Path, Path]:
+    """Pick (image_folder, annotation_json) for train / val / test layouts (COCO, VisDrone, Roboflow, etc.)."""
     ann_candidates = {
         "train": [
             root / "train" / "_annotations.coco.json",
@@ -446,6 +444,7 @@ def _resolve_build_coco_ann_and_images(root: Path, split: str) -> Tuple[Path, Pa
 
 
 def build_coco(image_set: str, args: Any, resolution: int) -> CocoDetection:
+    """Build a COCO-format dataset; annotation and image paths are auto-detected."""
     root = Path(args.coco_path)
     assert root.exists(), f"provided COCO path {root} does not exist"
     split = image_set.split("_")[0]
@@ -459,7 +458,6 @@ def build_coco(image_set: str, args: Any, resolution: int) -> CocoDetection:
     skip_random_resize = not getattr(args, "do_random_resize_via_padding", False)
     patch_size = getattr(args, "patch_size", 16)
     num_windows = getattr(args, "num_windows", 4)
-    document_aug = getattr(args, "document_aug", False)
 
     transform_fn = (
         make_coco_transforms_square_div_64 if square_resize_div_64 else make_coco_transforms
@@ -472,7 +470,6 @@ def build_coco(image_set: str, args: Any, resolution: int) -> CocoDetection:
         skip_random_resize=skip_random_resize,
         patch_size=patch_size,
         num_windows=num_windows,
-        document_aug=document_aug,
     )
     return CocoDetection(
         img_folder,
@@ -481,14 +478,18 @@ def build_coco(image_set: str, args: Any, resolution: int) -> CocoDetection:
         include_masks=include_masks,
     )
 
-
 def build_roboflow_from_coco(image_set: str, args: Any, resolution: int) -> CocoDetection:
+    """Build a Roboflow COCO-format dataset.
+
+    This uses Roboflow's standard directory structure
+    (train/valid/test folders with _annotations.coco.json).
+    """
     root = Path(args.dataset_dir)
     assert root.exists(), f'provided Roboflow path {root} does not exist'
     PATHS = {
         "train": (root / "images", root / "train" / "_annotations.coco.json"),
-        "val":   (root / "images", root / "valid" / "_annotations.coco.json"),
-        "test":  (root / "images", root / "valid" / "_annotations.coco.json"),
+        "val": (root /  "images", root / "valid" / "_annotations.coco.json"),
+        "test": (root / "images", root / "valid" / "_annotations.coco.json"),
     }
 
     img_folder, ann_file = PATHS[image_set.split("_")[0]]
@@ -499,24 +500,25 @@ def build_roboflow_from_coco(image_set: str, args: Any, resolution: int) -> Coco
     do_random_resize_via_padding = getattr(args, "do_random_resize_via_padding", False)
     patch_size = getattr(args, "patch_size", 16)
     num_windows = getattr(args, "num_windows", 4)
-    document_aug = getattr(args, "document_aug", False)
 
-    transform_fn = (
-        make_coco_transforms_square_div_64 if square_resize_div_64 else make_coco_transforms
-    )
-    transforms = transform_fn(
-        image_set,
-        resolution,
-        multi_scale=multi_scale,
-        expanded_scales=expanded_scales,
-        skip_random_resize=not do_random_resize_via_padding,
-        patch_size=patch_size,
-        num_windows=num_windows,
-        document_aug=document_aug,
-    )
-    return CocoDetection(
-        img_folder,
-        ann_file,
-        transforms=transforms,
-        include_masks=include_masks,
-    )
+    if square_resize_div_64:
+        dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms_square_div_64(
+            image_set,
+            resolution,
+            multi_scale=multi_scale,
+            expanded_scales=expanded_scales,
+            skip_random_resize=not do_random_resize_via_padding,
+            patch_size=patch_size,
+            num_windows=num_windows
+        ), include_masks=include_masks)
+    else:
+        dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(
+            image_set,
+            resolution,
+            multi_scale=multi_scale,
+            expanded_scales=expanded_scales,
+            skip_random_resize=not do_random_resize_via_padding,
+            patch_size=patch_size,
+            num_windows=num_windows
+        ), include_masks=include_masks)
+    return dataset
