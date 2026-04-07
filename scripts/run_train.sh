@@ -21,13 +21,6 @@ set -e
 VENV_BIN="/venv/main/bin"
 export PATH="${VENV_BIN}:${PATH}"
 
-# Kiểm tra nhanh — thoát sớm nếu torch vẫn không thấy
-if ! "${VENV_BIN}/python3" -c "import torch" 2>/dev/null; then
-    echo "ERROR: PyTorch không tìm thấy trong ${VENV_BIN}/python3" >&2
-    echo "       Kiểm tra lại đường dẫn VENV_BIN hoặc cài torch trước." >&2
-    exit 1
-fi
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
