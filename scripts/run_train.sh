@@ -257,5 +257,5 @@ echo "============================================================"
 # torchrun: script phải là file .py (không chèn "python3" giữa torchrun và script).
 # Đặt TORCHRUN_EXTRA ví dụ: "--master_port 29501" nếu trùng port với job khác.
 # shellcheck disable=SC2086
-"${VENV_BIN}/torchrun" --nproc_per_node="${NPROC_PER_NODE}" ${TORCHRUN_EXTRA} \
+torchrun --nproc_per_node="${NPROC_PER_NODE}" ${TORCHRUN_EXTRA} \
     "${SCRIPT_DIR}/train.py" "$@"
