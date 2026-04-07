@@ -93,6 +93,14 @@ def _build_parser() -> argparse.ArgumentParser:
     model.add_argument("--no-convnext-projector", action="store_true")
     model.add_argument("--freeze-encoder",        action="store_true")
 
+    cpfe = p.add_argument_group("CPFE — Cortical Perceptual Feature Enhancement")
+    cpfe.add_argument("--no-cpfe",     action="store_false", dest="use_cpfe",     help="Disable CPFE module entirely")
+    cpfe.add_argument("--no-cpfe-sdg", action="store_false", dest="cpfe_use_sdg", help="Disable Spectral Decomposition Gate")
+    cpfe.add_argument("--no-cpfe-dn",  action="store_false", dest="cpfe_use_dn",  help="Disable Divisive Normalization")
+    cpfe.add_argument("--no-cpfe-tpr", action="store_false", dest="cpfe_use_tpr", help="Disable Top-Down Predictive Refinement")
+
+    p.set_defaults(use_cpfe=True, cpfe_use_sdg=True, cpfe_use_dn=True, cpfe_use_tpr=True)
+
     opt = p.add_argument_group("optimizer / schedule")
     opt.add_argument("--lr",               type=float, default=2e-4)
     opt.add_argument("--lr-encoder",       type=float, default=2.5e-5)
@@ -141,6 +149,10 @@ def main() -> None:
         use_convnext_projector=use_convnext,
         freeze_encoder=args.freeze_encoder,
         device=args.device,
+        use_cpfe=args.use_cpfe,
+        cpfe_use_sdg=args.cpfe_use_sdg,
+        cpfe_use_dn=args.cpfe_use_dn,
+        cpfe_use_tpr=args.cpfe_use_tpr,
     )
     model = _MODELS[args.model_size](**model_kw)
 

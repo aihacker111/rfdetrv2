@@ -29,9 +29,17 @@ PRETRAINED_ENCODER=""             # đường dẫn .pth DINOv3 backbone (để 
 # =============================================================================
 # MODEL
 # =============================================================================
-MODEL_SIZE="base"                 # nano | small | base | large
+MODEL_SIZE="nano"                 # nano | small | base | large
 USE_WINDOWED_ATTN=false           # true = bật window attention (tiết kiệm VRAM)
 FREEZE_ENCODER=false              # true = đóng băng DINOv3 backbone
+
+# =============================================================================
+# CPFE — Cortical Perceptual Feature Enhancement
+# =============================================================================
+USE_CPFE=true                     # master toggle — false = tắt toàn bộ CPFE
+CPFE_USE_SDG=true                 # Spectral Decomposition Gate (Center-Surround)
+CPFE_USE_DN=true                  # Divisive Normalization (Lateral Inhibition)
+CPFE_USE_TPR=true                 # Top-Down Predictive Refinement (Cortical Feedback)
 
 # =============================================================================
 # TRAINING RUN
@@ -120,8 +128,12 @@ ARGS=(
 [[ "${TENSORBOARD}"                 == "true" ]] && ARGS+=(--tensorboard)         || ARGS+=(--no-tensorboard)
 [[ "${USE_WINDOWED_ATTN}"           == "true" ]] && ARGS+=(--use-windowed-attn)
 [[ "${FREEZE_ENCODER}"              == "true" ]] && ARGS+=(--freeze-encoder)
-[[ "${USE_VARIFOCAL_LOSS}"          == "true" ]] && ARGS+=(--use-varifocal-loss)
+[[ "${USE_VARIFOCAL_LOSS}"          == "true"  ]] && ARGS+=(--use-varifocal-loss)
 [[ "${USE_PROTOTYPE_ALIGN}"         == "false" ]] && ARGS+=(--no-prototype-align)
+[[ "${USE_CPFE}"                    == "false" ]] && ARGS+=(--no-cpfe)
+[[ "${CPFE_USE_SDG}"                == "false" ]] && ARGS+=(--no-cpfe-sdg)
+[[ "${CPFE_USE_DN}"                 == "false" ]] && ARGS+=(--no-cpfe-dn)
+[[ "${CPFE_USE_TPR}"                == "false" ]] && ARGS+=(--no-cpfe-tpr)
 [[ "${PROTOTYPE_USE_FREQ_WEIGHT}"   == "false" ]] && ARGS+=(--no-prototype-use-freq-weight)
 [[ "${PROTOTYPE_USE_QUALITY_WEIGHT}" == "false" ]] && ARGS+=(--no-prototype-use-quality-weight)
 [[ "${PROTOTYPE_USE_REPULSION}"     == "false" ]] && ARGS+=(--no-prototype-use-repulsion)
@@ -131,8 +143,8 @@ ARGS=(
 # RUN
 # =============================================================================
 echo "============================================================"
-echo "  RF-DETR v2 Training"
-echo "  Model   : ${MODEL_SIZE}  |  Epochs: ${EPOCHS}  |  BS: ${BATCH_SIZE}×${GRAD_ACCUM_STEPS}"
+echo "  RF-DETR v2 Training (from scratch)"
+echo "  Model   : ${MODEL_SIZE}  |  Epochs: ${EPOCHS}  |  BS: ${BATCH_SIZE}×${GRAD_ACCUM_STEPS}  |  CPFE: ${USE_CPFE}"
 echo "  Dataset : ${DATASET_DIR}"
 echo "  Output  : ${OUTPUT_DIR}"
 echo "  GPU     : CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
