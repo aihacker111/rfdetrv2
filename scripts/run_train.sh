@@ -15,6 +15,19 @@
 
 set -e
 
+# =============================================================================
+# FIX: Ưu tiên venv để torchrun và python3 dùng cùng môi trường
+# =============================================================================
+VENV_BIN="/venv/main/bin"
+export PATH="${VENV_BIN}:${PATH}"
+
+# Kiểm tra nhanh — thoát sớm nếu torch vẫn không thấy
+if ! "${VENV_BIN}/python3" -c "import torch" 2>/dev/null; then
+    echo "ERROR: PyTorch không tìm thấy trong ${VENV_BIN}/python3" >&2
+    echo "       Kiểm tra lại đường dẫn VENV_BIN hoặc cài torch trước." >&2
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
@@ -53,11 +66,11 @@ CPFE_USE_TPR=false           # Top-Down Predictive Refinement (Cortical Feedback
 # =============================================================================
 # Virtual FPN: backbone vẫn chỉ cần một lưới P4 (cùng H×W); projector_scale
 # ['P3','P4','P5'] (hoặc thêm P6) là tên các mức ảo cho MSDeformAttn — không
-# phải “chạy backbone 3 lần”.
+# phải "chạy backbone 3 lần".
 USE_VIRTUAL_FPN_PROJECTOR=true   # true = MultiDilationP4Projector
 PROJECTOR_INCLUDES_P6=true       # true → projector_scale P3–P6 (thêm mức coarse)
-USE_SCALE_AWARE_ROPE=true      # true = RoPE 2D + log(w,h) ở decoder self-attn
-ENHANCED_PROTOTYPE_MEMORY=true # true = EnhancedPrototypeMemory (τ/lớp, hard-neg, …)
+USE_SCALE_AWARE_ROPE=true        # true = RoPE 2D + log(w,h) ở decoder self-attn
+ENHANCED_PROTOTYPE_MEMORY=true   # true = EnhancedPrototypeMemory (τ/lớp, hard-neg, …)
 PROTOTYPE_REPULSION_MARGIN=0.0
 PROTOTYPE_USE_ADAPTIVE_TEMP=true
 PROTOTYPE_USE_DUAL_PROTO=true
@@ -68,29 +81,29 @@ PROTOTYPE_HARD_NEG_K=5
 # =============================================================================
 EPOCHS=50
 BATCH_SIZE=32                # per-GPU batch (tăng GRAD_ACCUM_STEPS để bù)
-GRAD_ACCUM_STEPS=4          # effective batch = BATCH_SIZE × GRAD_ACCUM_STEPS = 64
-NUM_WORKERS=8               # giảm worker tránh "Too many open files"
+GRAD_ACCUM_STEPS=4           # effective batch = BATCH_SIZE × GRAD_ACCUM_STEPS = 128
+NUM_WORKERS=8                # giảm worker tránh "Too many open files"
 AMP=false                    # true = FP16 mixed precision
 TENSORBOARD=true
-DEVICE="cuda"               # cuda | cpu | mps
-DEBUG_DATA_LIMIT=0          # 0 = full dataset; N > 0 = chỉ dùng N ảnh (smoke test)
+DEVICE="cuda"                # cuda | cpu | mps
+DEBUG_DATA_LIMIT=0           # 0 = full dataset; N > 0 = chỉ dùng N ảnh (smoke test)
 
 # =============================================================================
 # OPTIMIZER / LEARNING RATE SCHEDULE
 # =============================================================================
 LR=3e-4
-LR_ENCODER=2.5e-5           # LR riêng cho encoder (thường nhỏ hơn)
-LR_SCALE_MODE="sqrt"        # linear | sqrt
-WARMUP_EPOCHS=1
+LR_ENCODER=2.5e-5            # LR riêng cho encoder (thường nhỏ hơn)
+LR_SCALE_MODE="sqrt"         # linear | sqrt
+WARMUP_EPOCHS=3
 LR_SCHEDULER="cosine_restart"  # cosine_restart | cosine | multistep | linear | wsd
-LR_RESTART_PERIOD=25        # số epoch mỗi chu kỳ cosine restart
-LR_RESTART_DECAY=0.8        # hệ số giảm LR mỗi restart
-LR_MIN_FACTOR=0.05          # LR tối thiểu = LR × LR_MIN_FACTOR
+LR_RESTART_PERIOD=25         # số epoch mỗi chu kỳ cosine restart
+LR_RESTART_DECAY=0.8         # hệ số giảm LR mỗi restart
+LR_MIN_FACTOR=0.05           # LR tối thiểu = LR × LR_MIN_FACTOR
 
 # =============================================================================
 # LOSS
 # =============================================================================
-USE_VARIFOCAL_LOSS=false    # true = varifocal loss; false = focal loss (khuyến nghị cho train from scratch)
+USE_VARIFOCAL_LOSS=false     # true = varifocal loss; false = focal loss (khuyến nghị cho train from scratch)
 CLS_LOSS_COEF=1.0
 BBOX_LOSS_COEF=5.0
 GIOU_LOSS_COEF=2.0
@@ -232,6 +245,8 @@ ulimit -n 65536 2>/dev/null || true
 
 echo "============================================================"
 echo "  RF-DETR v2 Training (from scratch)"
+echo "  Python  : $(${VENV_BIN}/python3 --version 2>&1)"
+echo "  Torch   : $(${VENV_BIN}/python3 -c 'import torch; print(torch.__version__)')"
 echo "  Model   : ${MODEL_SIZE}  |  Epochs: ${EPOCHS}  |  BS: ${BATCH_SIZE}x${GRAD_ACCUM_STEPS}  |  CPFE: ${USE_CPFE}"
 echo "  LW++    : vFPN=${USE_VIRTUAL_FPN_PROJECTOR}  P6=${PROJECTOR_INCLUDES_P6}  RoPE=${USE_SCALE_AWARE_ROPE}  EProto=${ENHANCED_PROTOTYPE_MEMORY}"
 echo "  Dataset : ${DATASET_DIR}"
@@ -242,5 +257,5 @@ echo "============================================================"
 # torchrun: script phải là file .py (không chèn "python3" giữa torchrun và script).
 # Đặt TORCHRUN_EXTRA ví dụ: "--master_port 29501" nếu trùng port với job khác.
 # shellcheck disable=SC2086
-torchrun --nproc_per_node="${NPROC_PER_NODE}" ${TORCHRUN_EXTRA} \
+"${VENV_BIN}/torchrun" --nproc_per_node="${NPROC_PER_NODE}" ${TORCHRUN_EXTRA} \
     "${SCRIPT_DIR}/train.py" "$@"
