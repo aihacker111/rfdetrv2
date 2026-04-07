@@ -9,6 +9,8 @@
 # → Muốn finetune từ checkpoint COCO?  Dùng scripts/run_finetune.sh
 #
 # Chạy:  sh scripts/run_train.sh
+# Huấn luyện qua torchrun (mặc định --nproc_per_node=1). Multi-GPU: ví dụ
+#   NPROC_PER_NODE=4 CUDA_VISIBLE_DEVICES=0,1,2,3 sh scripts/run_train.sh
 # =============================================================================
 
 set -e
@@ -107,10 +109,13 @@ PROTOTYPE_USE_QUALITY_WEIGHT=true
 PROTOTYPE_USE_REPULSION=true
 
 # =============================================================================
-# GPU
+# GPU / distributed (torchrun)
 # =============================================================================
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export CUDA_VISIBLE_DEVICES
+# Số process trên máy này (thường = số GPU dùng). 1 = single-GPU giống python3 trực tiếp.
+NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
+TORCHRUN_EXTRA="${TORCHRUN_EXTRA:-}"
 
 # =============================================================================
 # BUILD ARGS (POSIX sh — dùng positional params "$@")
@@ -231,7 +236,11 @@ echo "  Model   : ${MODEL_SIZE}  |  Epochs: ${EPOCHS}  |  BS: ${BATCH_SIZE}x${GR
 echo "  LW++    : vFPN=${USE_VIRTUAL_FPN_PROJECTOR}  P6=${PROJECTOR_INCLUDES_P6}  RoPE=${USE_SCALE_AWARE_ROPE}  EProto=${ENHANCED_PROTOTYPE_MEMORY}"
 echo "  Dataset : ${DATASET_DIR}"
 echo "  Output  : ${OUTPUT_DIR}"
-echo "  GPU     : CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+echo "  GPU     : CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}  nproc_per_node=${NPROC_PER_NODE}"
 echo "============================================================"
 
-exec python3 "${SCRIPT_DIR}/train.py" "$@"
+# torchrun: script phải là file .py (không chèn "python3" giữa torchrun và script).
+# Đặt TORCHRUN_EXTRA ví dụ: "--master_port 29501" nếu trùng port với job khác.
+# shellcheck disable=SC2086
+exec torchrun --nproc_per_node="${NPROC_PER_NODE}" ${TORCHRUN_EXTRA} \
+    "${SCRIPT_DIR}/train.py" "$@"
