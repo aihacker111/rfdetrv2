@@ -17,6 +17,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
+# Boolean env: [ test ] phân biệt hoa thường — False ≠ false. Chuẩn hoá về lowercase.
+_sh_lc() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
 # =============================================================================
 # PATHS — BẮT BUỘC chỉnh DATASET_DIR
 # =============================================================================
@@ -36,10 +41,10 @@ FREEZE_ENCODER=false        # true = đóng băng DINOv3 backbone
 # =============================================================================
 # CPFE — Cortical Perceptual Feature Enhancement
 # =============================================================================
-USE_CPFE=False               # master toggle — false = tắt toàn bộ CPFE
-CPFE_USE_SDG=False           # Spectral Decomposition Gate (Center-Surround)
-CPFE_USE_DN=False            # Divisive Normalization (Lateral Inhibition)
-CPFE_USE_TPR=False           # Top-Down Predictive Refinement (Cortical Feedback)
+USE_CPFE=false               # master toggle — false = tắt toàn bộ CPFE
+CPFE_USE_SDG=false           # Spectral Decomposition Gate (Center-Surround)
+CPFE_USE_DN=false            # Divisive Normalization (Lateral Inhibition)
+CPFE_USE_TPR=false           # Top-Down Predictive Refinement (Cortical Feedback)
 
 # =============================================================================
 # LW-DETR++ — virtual FPN neck, scale-aware RoPE, enhanced prototype memory
@@ -141,71 +146,71 @@ if [ -n "${PRETRAINED_ENCODER}" ]; then
 fi
 
 # Flags
-if [ "${AMP}" = "true" ]; then
+if [ "$(_sh_lc "${AMP}")" = "true" ]; then
     set -- "$@" --amp
 fi
-if [ "${TENSORBOARD}" = "true" ]; then
+if [ "$(_sh_lc "${TENSORBOARD}")" = "true" ]; then
     set -- "$@" --tensorboard
 else
     set -- "$@" --no-tensorboard
 fi
-if [ "${USE_WINDOWED_ATTN}" = "true" ]; then
+if [ "$(_sh_lc "${USE_WINDOWED_ATTN}")" = "true" ]; then
     set -- "$@" --use-windowed-attn
 fi
-if [ "${FREEZE_ENCODER}" = "true" ]; then
+if [ "$(_sh_lc "${FREEZE_ENCODER}")" = "true" ]; then
     set -- "$@" --freeze-encoder
 fi
-if [ "${USE_VARIFOCAL_LOSS}" = "true" ]; then
+if [ "$(_sh_lc "${USE_VARIFOCAL_LOSS}")" = "true" ]; then
     set -- "$@" --use-varifocal-loss
 fi
 
 # Prototype flags
-if [ "${USE_PROTOTYPE_ALIGN}" = "false" ]; then
+if [ "$(_sh_lc "${USE_PROTOTYPE_ALIGN}")" = "false" ]; then
     set -- "$@" --no-prototype-align
 fi
-if [ "${PROTOTYPE_USE_FREQ_WEIGHT}" = "false" ]; then
+if [ "$(_sh_lc "${PROTOTYPE_USE_FREQ_WEIGHT}")" = "false" ]; then
     set -- "$@" --no-prototype-use-freq-weight
 fi
-if [ "${PROTOTYPE_USE_QUALITY_WEIGHT}" = "false" ]; then
+if [ "$(_sh_lc "${PROTOTYPE_USE_QUALITY_WEIGHT}")" = "false" ]; then
     set -- "$@" --no-prototype-use-quality-weight
 fi
-if [ "${PROTOTYPE_USE_REPULSION}" = "false" ]; then
+if [ "$(_sh_lc "${PROTOTYPE_USE_REPULSION}")" = "false" ]; then
     set -- "$@" --no-prototype-use-repulsion
 fi
 
-# CPFE flags
-if [ "${USE_CPFE}" = "false" ]; then
+# CPFE flags — khi tắt: backbone gán self.cpfe = None, forward bỏ qua (không chạy ngầm).
+if [ "$(_sh_lc "${USE_CPFE}")" = "false" ]; then
     set -- "$@" --no-cpfe
 fi
-if [ "${CPFE_USE_SDG}" = "false" ]; then
+if [ "$(_sh_lc "${CPFE_USE_SDG}")" = "false" ]; then
     set -- "$@" --no-cpfe-sdg
 fi
-if [ "${CPFE_USE_DN}" = "false" ]; then
+if [ "$(_sh_lc "${CPFE_USE_DN}")" = "false" ]; then
     set -- "$@" --no-cpfe-dn
 fi
-if [ "${CPFE_USE_TPR}" = "false" ]; then
+if [ "$(_sh_lc "${CPFE_USE_TPR}")" = "false" ]; then
     set -- "$@" --no-cpfe-tpr
 fi
 
 # LW-DETR++
-if [ "${USE_VIRTUAL_FPN_PROJECTOR}" = "true" ]; then
+if [ "$(_sh_lc "${USE_VIRTUAL_FPN_PROJECTOR}")" = "true" ]; then
     set -- "$@" --use-virtual-fpn-projector
 fi
-if [ "${PROJECTOR_INCLUDES_P6}" = "true" ]; then
+if [ "$(_sh_lc "${PROJECTOR_INCLUDES_P6}")" = "true" ]; then
     set -- "$@" --projector-includes-p6
 fi
-if [ "${USE_SCALE_AWARE_ROPE}" = "true" ]; then
+if [ "$(_sh_lc "${USE_SCALE_AWARE_ROPE}")" = "true" ]; then
     set -- "$@" --use-scale-aware-rope
 fi
-if [ "${ENHANCED_PROTOTYPE_MEMORY}" = "true" ]; then
+if [ "$(_sh_lc "${ENHANCED_PROTOTYPE_MEMORY}")" = "true" ]; then
     set -- "$@" --enhanced-prototype-memory
 fi
 set -- "$@" --prototype-repulsion-margin "${PROTOTYPE_REPULSION_MARGIN}"
 set -- "$@" --prototype-hard-neg-k "${PROTOTYPE_HARD_NEG_K}"
-if [ "${PROTOTYPE_USE_ADAPTIVE_TEMP}" = "false" ]; then
+if [ "$(_sh_lc "${PROTOTYPE_USE_ADAPTIVE_TEMP}")" = "false" ]; then
     set -- "$@" --no-prototype-use-adaptive-temp
 fi
-if [ "${PROTOTYPE_USE_DUAL_PROTO}" = "false" ]; then
+if [ "$(_sh_lc "${PROTOTYPE_USE_DUAL_PROTO}")" = "false" ]; then
     set -- "$@" --no-prototype-use-dual-proto
 fi
 
