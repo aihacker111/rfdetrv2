@@ -45,9 +45,9 @@ CPFE_USE_TPR=true           # Top-Down Predictive Refinement (Cortical Feedback)
 # TRAINING RUN
 # =============================================================================
 EPOCHS=50
-BATCH_SIZE=64
-GRAD_ACCUM_STEPS=4          # effective batch = BATCH_SIZE × GRAD_ACCUM_STEPS
-NUM_WORKERS=8
+BATCH_SIZE=32                # per-GPU batch (tăng GRAD_ACCUM_STEPS để bù)
+GRAD_ACCUM_STEPS=4          # effective batch = BATCH_SIZE × GRAD_ACCUM_STEPS = 64
+NUM_WORKERS=4               # giảm worker tránh "Too many open files"
 AMP=true                    # true = FP16 mixed precision
 TENSORBOARD=true
 DEVICE="cuda"               # cuda | cpu | mps
@@ -56,7 +56,7 @@ DEBUG_DATA_LIMIT=0          # 0 = full dataset; N > 0 = chỉ dùng N ảnh (smo
 # =============================================================================
 # OPTIMIZER / LEARNING RATE SCHEDULE
 # =============================================================================
-LR=2e-4
+LR=3e-4
 LR_ENCODER=2.5e-5           # LR riêng cho encoder (thường nhỏ hơn)
 LR_SCALE_MODE="sqrt"        # linear | sqrt
 WARMUP_EPOCHS=1
@@ -180,6 +180,9 @@ fi
 # =============================================================================
 # RUN
 # =============================================================================
+# Tăng giới hạn file descriptor để tránh "Too many open files"
+ulimit -n 65536 2>/dev/null || true
+
 echo "============================================================"
 echo "  RF-DETR v2 Training (from scratch)"
 echo "  Model   : ${MODEL_SIZE}  |  Epochs: ${EPOCHS}  |  BS: ${BATCH_SIZE}x${GRAD_ACCUM_STEPS}  |  CPFE: ${USE_CPFE}"
