@@ -195,7 +195,6 @@ def conv_flop_jit(
     # 0) input tensor, 1) convolution filter, 2) bias, 3) stride, 4) padding,
     # 5) dilation, 6) transposed, 7) out_pad, 8) groups, 9) benchmark_cudnn,
     # 10) deterministic_cudnn and 11) user_enabled_cudnn.
-    # import ipdb; ipdb.set_trace()
     # assert len(inputs) == 12
     x, w = inputs[:2]
     x_shape, w_shape, out_shape = (
@@ -586,7 +585,6 @@ def fmt_res(data: np.ndarray) -> Dict[str, float]:
 
 def benchmark(model: torch.nn.Module, dataset: Sequence[Any], output_dir: Any) -> Dict[str, Any]:
     print("Get model size, FLOPs, and FPS")
-    # import pdb; pdb.set_trace()
     _outputs = {}
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     _outputs.update({"nparam": n_parameters})
@@ -601,7 +599,6 @@ def benchmark(model: torch.nn.Module, dataset: Sequence[Any], output_dir: Any) -
     for idx in range(total_step):
         img, t = dataset[idx]
         images.append(img)
-    # import pdb; pdb.set_trace()
     with torch.no_grad():
         tmp = []
         tmp2 = []

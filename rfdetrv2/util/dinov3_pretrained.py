@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable
@@ -86,6 +85,7 @@ def _download_file(
         with urlopen(req, timeout=timeout) as resp, open(tmp, "wb") as out:
             total = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
+            last_pct = -1
             while True:
                 chunk = resp.read(chunk_size)
                 if not chunk:
@@ -94,14 +94,9 @@ def _download_file(
                 downloaded += len(chunk)
                 if total:
                     pct = downloaded * 100 // total
-                    print(
-                        f"\r  {dest.name}: {pct}% ({downloaded/1e6:.1f}/{total/1e6:.1f} MB)",
-                        end="",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-            if total:
-                print(file=sys.stderr)  # newline after progress
+                    if pct >= last_pct + 10:
+                        logger.info("  %s: %d%% (%.1f/%.1f MB)", dest.name, pct, downloaded / 1e6, total / 1e6)
+                        last_pct = pct
         tmp.replace(dest)
     except (OSError, URLError):
         if tmp.exists():
@@ -152,10 +147,9 @@ def download_dinov3_pretrained_weights(
                 logger.debug("Skip existing DINOv3 weight (after lock): %s", target)
                 continue
             url = _url_for_relative(rel)
-            logger.info("Downloading DINOv3 weights → %s  url=%s", target.name, url)
-            print(f"Downloading {filename} from HuggingFace ...", file=sys.stderr)
+            logger.info("Downloading DINOv3 weights: %s (url=%s)", target.name, url)
             _download_file(url, target)
-            print(f"Saved → {target}", file=sys.stderr)
+            logger.info("DINOv3 weights saved: %s", target)
 
     return out
 
@@ -202,11 +196,7 @@ def ensure_dinov3_hub_source(dest_repo_dir: Path) -> Path:
             return dest_repo_dir
 
         url = os.environ.get("DINOV3_SOURCE_ZIP_URL", "").strip() or DEFAULT_DINOV3_SOURCE_ZIP_URL
-        logger.info("Downloading DINOv3 hub source tree → %s  url=%s", dest_repo_dir, url)
-        print(
-            "Downloading DINOv3 source (hubconf + package) from GitHub ...",
-            file=sys.stderr,
-        )
+        logger.info("Downloading DINOv3 hub source tree: %s (url=%s)", dest_repo_dir, url)
 
         parent = dest_repo_dir.parent
         parent.mkdir(parents=True, exist_ok=True)
@@ -238,7 +228,7 @@ def ensure_dinov3_hub_source(dest_repo_dir: Path) -> Path:
             raise FileNotFoundError(
                 f"After extract, hubconf.py still missing at '{dest_repo_dir}'."
             )
-        print(f"DINOv3 hub source saved → {dest_repo_dir}", file=sys.stderr)
+        logger.info("DINOv3 hub source saved: %s", dest_repo_dir)
 
     return dest_repo_dir
 

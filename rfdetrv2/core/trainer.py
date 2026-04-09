@@ -22,9 +22,12 @@ Supports:
 
 from __future__ import annotations
 
+import logging
 import math
 import random
 from typing import Callable, DefaultDict, Iterable, List
+
+logger = logging.getLogger(__name__)
 
 import torch
 import torch.nn.functional as F
@@ -100,7 +103,8 @@ def train_one_epoch(
 
     start_steps = epoch * num_training_steps_per_epoch
 
-    scaler = GradScaler(enabled=args.amp) if _LEGACY_AMP else GradScaler("cuda", enabled=args.amp)
+    scaler_kwargs = {"enabled": args.amp, "growth_interval": 100}
+    scaler = GradScaler(**scaler_kwargs) if _LEGACY_AMP else GradScaler("cuda", **scaler_kwargs)
 
     assert batch_size % args.grad_accum_steps == 0, (
         f"batch_size ({batch_size}) must be divisible by grad_accum_steps ({args.grad_accum_steps})"
@@ -158,7 +162,13 @@ def train_one_epoch(
         loss_value = sum(loss_dict_scaled.values()).item()
 
         if not math.isfinite(loss_value):
-            raise ValueError(f"Loss became {loss_value}. Stopping training.\n{loss_dict_reduced}")
+            logger.warning(
+                "Non-finite loss (%s) at step %d — skipping batch and zeroing gradients.",
+                loss_value, it,
+            )
+            optimizer.zero_grad()
+            scaler.update()  # keep scaler state consistent
+            continue
 
         if max_norm > 0:
             scaler.unscale_(optimizer)
@@ -178,9 +188,10 @@ def train_one_epoch(
         metric_logger.update(class_error=loss_dict_reduced["class_error"])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
-        # Prototype alignment loss (lwdetr_prototype)
-        if "loss_proto_align" in loss_dict_reduced:
-            metric_logger.update(loss_proto_align=loss_dict_reduced["loss_proto_align"].item())
+        # Superposition-aware prototype losses
+        for _pk in ("loss_proto_pull", "loss_proto_ortho", "loss_proto_disambig", "loss_proto_sparse"):
+            if _pk in loss_dict_reduced:
+                metric_logger.update(**{_pk: loss_dict_reduced[_pk].item()})
 
     metric_logger.synchronize_between_processes()
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}

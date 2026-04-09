@@ -13,39 +13,20 @@ from rfdetrv2.models.backbone import Joiner
 
 
 def get_vit_lr_decay_rate(name: str, lr_decay_rate: float = 1.0, num_layers: int = 12) -> float:
-    """
-    Calculate lr decay rate for different ViT blocks.
-
-    Args:
-        name: parameter name.
-        lr_decay_rate: base lr decay rate.
-        num_layers: number of ViT blocks.
-    Returns:
-        lr decay rate for the given parameter.
-    """
+    """Calculate layer-wise LR decay rate for ViT blocks."""
     layer_id = num_layers + 1
     if name.startswith("backbone"):
         if ".pos_embed" in name or ".patch_embed" in name:
             layer_id = 0
         elif ".blocks." in name and ".residual." not in name:
-            layer_id = int(name[name.find(".blocks.") :].split(".")[2]) + 1
-    print("name: {}, lr_decay: {}".format(name, lr_decay_rate ** (num_layers + 1 - layer_id)))
+            layer_id = int(name[name.find(".blocks."):].split(".")[2]) + 1
     return lr_decay_rate ** (num_layers + 1 - layer_id)
 
 
 def get_vit_weight_decay_rate(name: str, weight_decay_rate: float = 1.0) -> float:
-    """
-    Calculate weight decay rate for different ViT parameters.
-
-    Args:
-        name: parameter name.
-        weight_decay_rate: base weight decay rate.
-    Returns:
-        weight decay rate for the given parameter.
-    """
-    if ('gamma' in name) or ('pos_embed' in name) or ('rel_pos' in name) or ('bias' in name) or ('norm' in name):
-        weight_decay_rate = 0.
-    print("name: {}, weight_decay rate: {}".format(name, weight_decay_rate))
+    """Return 0.0 weight decay for parameters that should not be regularised."""
+    if any(tok in name for tok in ("gamma", "pos_embed", "rel_pos", "bias", "norm")):
+        weight_decay_rate = 0.0
     return weight_decay_rate
 
 

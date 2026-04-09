@@ -35,7 +35,6 @@ from typing import Callable, DefaultDict, List
 
 import numpy as np
 import torch
-from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader, DistributedSampler
 
 import rfdetrv2.util.misc as utils
@@ -855,16 +854,16 @@ def get_args_parser():
 
     parser.add_argument('--no_convnext_projector',        action='store_true', dest='no_use_convnext_projector')
 
-    # Prototype Alignment (lwdetr_query)
-    parser.add_argument('--no_prototype_align',            action='store_false', dest='use_prototype_align')
-    parser.add_argument('--prototype_loss_coef',          default=0.1, type=float)
-    parser.add_argument('--prototype_momentum',            default=0.999, type=float)
-    parser.add_argument('--prototype_warmup_steps',       default=200, type=int)
-    parser.add_argument('--prototype_temperature',        default=0.1, type=float)
-    parser.add_argument('--prototype_repulsion_coef',     default=0.1, type=float)
-    parser.add_argument('--no_prototype_use_freq_weight', action='store_false', dest='prototype_use_freq_weight')
-    parser.add_argument('--no_prototype_use_quality_weight', action='store_false', dest='prototype_use_quality_weight')
-    parser.add_argument('--no_prototype_use_repulsion',    action='store_false', dest='prototype_use_repulsion')
+    # Superposition-Aware Prototype Alignment
+    parser.add_argument('--no_prototype_align',       action='store_false', dest='use_prototype_align')
+    parser.add_argument('--prototype_loss_coef',      default=0.1,  type=float)
+    parser.add_argument('--prototype_momentum',       default=0.999, type=float)
+    parser.add_argument('--prototype_warmup_steps',   default=200,  type=int)
+    parser.add_argument('--prototype_temperature',    default=0.1,  type=float)
+    parser.add_argument('--prototype_ortho_coef',     default=0.1,  type=float)
+    parser.add_argument('--prototype_disambig_coef',  default=0.1,  type=float)
+    parser.add_argument('--prototype_sparse_coef',    default=0.05, type=float)
+    parser.add_argument('--prototype_iou_threshold',  default=0.3,  type=float)
 
     # Dataset
     parser.add_argument('--dataset_file',        default="coco")
@@ -1068,21 +1067,19 @@ def populate_args(
     debug_data_limit=0,
     gradient_checkpointing=False,
     use_windowed_attn=False,
-    use_rsa=False,
-    sra_shared=True,
-    sra_G=32,
-    sra_heads=8,
     use_convnext_projector=True,
-    # Prototype Alignment (lwdetr_prototype)
+    use_fsca=False,
+    fsca_heads=8,
+    # Superposition-Aware Prototype Alignment
     use_prototype_align=True,
     prototype_loss_coef=0.1,
     prototype_momentum=0.999,
     prototype_warmup_steps=200,
     prototype_temperature=0.1,
-    prototype_repulsion_coef=0.1,
-    prototype_use_freq_weight=True,
-    prototype_use_quality_weight=True,
-    prototype_use_repulsion=True,
+    prototype_ortho_coef=0.1,
+    prototype_disambig_coef=0.1,
+    prototype_sparse_coef=0.05,
+    prototype_iou_threshold=0.3,
     # Additional
     subcommand=None,
     **extra_kwargs,
@@ -1194,20 +1191,18 @@ def populate_args(
         debug_data_limit=debug_data_limit,
         gradient_checkpointing=gradient_checkpointing,
         use_windowed_attn=use_windowed_attn,
-        use_rsa=use_rsa,
-        sra_shared=sra_shared,
-        sra_G=sra_G,
-        sra_heads=sra_heads,
         use_convnext_projector=use_convnext_projector,
+        use_fsca=use_fsca,
+        fsca_heads=fsca_heads,
         use_prototype_align=use_prototype_align,
         prototype_loss_coef=prototype_loss_coef,
         prototype_momentum=prototype_momentum,
         prototype_warmup_steps=prototype_warmup_steps,
         prototype_temperature=prototype_temperature,
-        prototype_repulsion_coef=prototype_repulsion_coef,
-        prototype_use_freq_weight=prototype_use_freq_weight,
-        prototype_use_quality_weight=prototype_use_quality_weight,
-        prototype_use_repulsion=prototype_use_repulsion,
+        prototype_ortho_coef=prototype_ortho_coef,
+        prototype_disambig_coef=prototype_disambig_coef,
+        prototype_sparse_coef=prototype_sparse_coef,
+        prototype_iou_threshold=prototype_iou_threshold,
         subcommand=subcommand,
         **extra_kwargs,
     )

@@ -38,6 +38,8 @@ from rfdetrv2.pipeline import (
 )
 from rfdetrv2.util.coco_classes import COCO_CLASSES
 from rfdetrv2.util.metrics import MetricsPlotSink, MetricsTensorBoardSink, MetricsWandBSink
+from rfdetrv2.util.dinov3_pretrained import resolve_pretrained_encoder_path, dinov3_pretrained_dir
+from rfdetrv2.util.rfdetr_pretrained import resolve_rfdetr_coco_checkpoint, RFDETR_COCO_CHECKPOINT_BY_SIZE
 
 logger = getLogger(__name__)
 
@@ -60,7 +62,64 @@ class RFDETRV2:
     def _default_model_config(self, **kwargs) -> ModelConfig:
         return ModelConfig(**kwargs)
 
+    @property
+    def _model_size(self) -> Optional[str]:
+        """Extract model size key from self.size (e.g. 'rfdetr-base' → 'base')."""
+        if self.size and "-" in self.size:
+            return self.size.rsplit("-", 1)[-1]
+        return None
+
+    def _ensure_dinov3_weights(self) -> None:
+        """Resolve and set DINOv3 pretrained encoder path if not already set."""
+        if self.model_config.pretrained_encoder:
+            return  # user already supplied explicit path
+        size = self._model_size
+        if size is None:
+            return  # custom model, no known size mapping
+        from pathlib import Path
+        DINO_WEIGHTS_BY_SIZE = {
+            "nano": "dinov3_vits16_pretrain_lvd1689m-08c60483.pth",
+            "small": "dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth",
+            "base": "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
+            "large": "dinov3_vitb16_pretrain_lvd1689m-73cec8be.pth",
+        }
+        project_root = Path(__file__).resolve().parents[1]
+        enc_path = resolve_pretrained_encoder_path(
+            project_root, size, explicit=None, weights_by_size=DINO_WEIGHTS_BY_SIZE
+        )
+        self.model_config = (
+            self.model_config.model_copy(update={"pretrained_encoder": enc_path})
+            if hasattr(self.model_config, "model_copy")
+            else self.model_config.copy(update={"pretrained_encoder": enc_path})
+        )
+        logger.info("DINOv3 encoder resolved: %s", enc_path)
+
+    def _ensure_rfdetr_weights(self) -> None:
+        """Auto-download RF-DETR COCO checkpoint for finetune/inference if not set."""
+        if self.model_config.pretrain_weights:
+            return  # user already supplied explicit path
+        size = self._model_size
+        if size is None or size not in RFDETR_COCO_CHECKPOINT_BY_SIZE:
+            logger.warning("Cannot auto-download RF-DETR weights: unknown model size %r", size)
+            return
+        from pathlib import Path
+        project_root = Path(__file__).resolve().parents[1]
+        ckpt_path = resolve_rfdetr_coco_checkpoint(project_root, size, explicit=None)
+        if ckpt_path:
+            self.model_config = (
+                self.model_config.model_copy(update={"pretrain_weights": ckpt_path})
+                if hasattr(self.model_config, "model_copy")
+                else self.model_config.copy(update={"pretrain_weights": ckpt_path})
+            )
+            logger.info("RF-DETR pretrained weights resolved: %s", ckpt_path)
+
     def train(self, **kwargs) -> None:
+        """Train from scratch. DINOv3 backbone weights are downloaded; RF-DETR pretrained is NOT used."""
+        self._ensure_dinov3_weights()
+        # Explicitly clear RF-DETR pretrained so it is never downloaded during scratch training.
+        if not self.model_config.pretrain_weights:
+            logger.info("Training from scratch — RF-DETR pretrained checkpoint will NOT be loaded.")
+
         train_config = TrainConfig(**kwargs)
         train_config = self._prepare_class_info(train_config)
 
@@ -71,6 +130,10 @@ class RFDETRV2:
         self._inference_pipeline = None
 
     def finetune(self, **kwargs) -> None:
+        """Fine-tune from RF-DETR COCO checkpoint. Both DINOv3 and RF-DETR weights are auto-downloaded."""
+        self._ensure_dinov3_weights()
+        self._ensure_rfdetr_weights()
+
         tune_config = FineTuneConfig(**kwargs)
         tune_config = self._prepare_class_info(tune_config)
 

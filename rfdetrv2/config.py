@@ -44,11 +44,9 @@ class ModelConfig(BaseModel):
     group_detr: int = 13
     gradient_checkpointing: bool = False
     use_windowed_attn: bool = False  # DINOv3: split image into num_windows² tiles for memory-efficient attention
-    use_rsa: bool = False  # SRA: chỉ bật khi CLI / kwargs (full-res; tắt windowed attn)
-    sra_shared: bool = True  # True = một khối SRA cho mọi mức feature (cùng dim); ít param ~× số mức
-    sra_G: int = 32  # Số centroid G (nhỏ hơn → ít param ở W_r; 64→32 ~giảm ~1/2 phần routing)
-    sra_heads: int = 8  # SRA heads (4 thay 8 cũng giảm param MHA nếu cần)
     use_convnext_projector: bool = True  # True=ConvNeXt fusion, False=C2f (backbone projector)
+    use_fsca: bool = False               # Replace ConvNeXtBlock with FSCAv2Block (XCA + DCT)
+    fsca_heads: int = 8                  # XCA attention heads inside FSCAv2Block
     positional_encoding_size: int
     ia_bce_loss: bool = True
     cls_loss_coef: float = 1.0
@@ -141,23 +139,6 @@ class RFDETRV2SmallConfig(ModelConfig):
     pretrain_weights: Optional[str] = None
     use_windowed_attn: bool = False
 
-# class RFDETRLargeConfig(ModelConfig):
-#     encoder: Literal["dinov3_nano", "dinov3_small", "dinov3_base", "dinov3_large"] = "dinov3_large"
-#     hidden_dim: int = 256
-#     dec_layers: int = 4
-#     sa_nheads: int = 8
-#     ca_nheads: int = 16
-#     dec_n_points: int = 12
-#     num_windows: int = 2
-#     patch_size: int = 16
-#     projector_scale: List[Literal["P4",]] = ["P4"]
-#     out_feature_indexes: List[int] = [3, 6, 9, 12]
-#     # num_classes: int = 80
-#     positional_encoding_size: int = 640 // 16
-#     pretrain_weights: Optional[str] = None
-#     resolution: int = 640
-#     use_windowed_attn: bool = False
-
 
 class RFDETRV2LargeConfig(ModelConfig):
     """
@@ -201,19 +182,18 @@ class TrainConfig(BaseModel):
     cls_loss_coef: float = 1.0
     bbox_loss_coef: float = 5.0
     giou_loss_coef: float = 2.0
-    use_varifocal_loss: bool = True  # Varifocal loss thay Focal loss cho classification
+    use_varifocal_loss: bool = True
     use_convnext_projector: bool = True
-    # Prototype Alignment (lwdetr_prototype) — EMA class prototypes cho query feature alignment
+    # Superposition-Aware Prototype Alignment
     use_prototype_align: bool = True
-    prototype_loss_coef: float = 0.1
-    prototype_momentum: float = 0.999      # EMA decay cho prototype update
-    prototype_warmup_steps: int = 200      # Chỉ update prototype, chưa tính loss
-    prototype_temperature: float = 0.1     # τ trong cosine classifier
-    # Enhanced PrototypeMemory (lwdetr_prototype)
-    prototype_repulsion_coef: float = 0.1  # [ENH-3] Inter-class repulsion loss weight
-    prototype_use_freq_weight: bool = True # [ENH-2] Class-frequency weighting
-    prototype_use_quality_weight: bool = True  # [ENH-4] Prototype quality weighting
-    prototype_use_repulsion: bool = True   # [ENH-3] Toggle inter-class repulsion
+    prototype_loss_coef: float = 0.1       # weight for pull loss
+    prototype_momentum: float = 0.999
+    prototype_warmup_steps: int = 200
+    prototype_temperature: float = 0.1
+    prototype_ortho_coef: float = 0.1      # [B] co-occurrence orthogonality
+    prototype_disambig_coef: float = 0.1   # [C] IoU-conditioned disambiguation
+    prototype_sparse_coef: float = 0.05    # [D] sparse decomposition
+    prototype_iou_threshold: float = 0.3   # min IoU to trigger disambiguation
     dataset_file: Literal["coco", "o365", "roboflow"] = "roboflow"
     square_resize_div_64: bool = True
     dataset_dir: str  # COCO layout root (train/, val/, annotations/); also default for coco_path when unset

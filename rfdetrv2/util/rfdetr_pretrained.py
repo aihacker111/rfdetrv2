@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 from pathlib import Path
 
 from rfdetrv2.util.dinov3_pretrained import _download_file, _exclusive_download_lock
@@ -61,10 +60,9 @@ def download_rfdetr_coco_checkpoint(
         if target.exists() and not overwrite:
             return target
         url = _hf_url(fname)
-        logger.info("Downloading RF-DETR COCO weights → %s  url=%s", target.name, url)
-        print(f"Downloading {fname} from HuggingFace ...", file=sys.stderr)
+        logger.info("Downloading RF-DETR COCO weights: %s (url=%s)", target.name, url)
         _download_file(url, target, timeout=600)
-        print(f"Saved → {target}", file=sys.stderr)
+        logger.info("RF-DETR COCO weights saved: %s", target)
     return target
 
 

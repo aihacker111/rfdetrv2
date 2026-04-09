@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('rfdetrv2/models/lwdetr.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('rfdetrv2/main.py'\\).read\\(\\)\\); ast.parse\\(open\\('rfdetrv2/config.py'\\).read\\(\\)\\); ast.parse\\(open\\('rfdetrv2/core/trainer.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
+    ]
+  }
+}

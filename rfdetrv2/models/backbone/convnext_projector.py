@@ -239,21 +239,23 @@ class ConvNeXtBlock(nn.Module):
 # ---------------------------------------------------------------------------
 
 class ConvNeXtFusion(nn.Module):
-    """Fuse multi-scale features sau khi concat, thay thế C2f.
+    """Fuse multi-scale features after concat.
 
-    Kiến trúc:
-        1×1 Conv  →  LayerNorm  →  N × ConvNeXtBlock
+    Architecture:
+        1×1 Conv → LayerNorm → N × Block
 
-    So với bản cũ:
-        Bỏ norm1 cuối (double norm thừa)                          [FIX-6]
-        expand_ratio và layer_scale_init truyền xuống block       [FIX-7]
+    Block is either ConvNeXtBlock (default) or FSCAv2Block when
+    ``spatial_shape`` is provided and ``use_fsca=True``.
 
     Args:
-        in_dim:           channels sau khi concat các scale features
-        out_dim:          output channels (= hidden_dim của detector)
-        num_blocks:       số ConvNeXtBlock
-        expand_ratio:     truyền xuống SwiGLU trong mỗi block
-        layer_scale_init: truyền xuống LayerScale trong mỗi block
+        in_dim:           input channels (post-concat)
+        out_dim:          output channels (= transformer hidden_dim)
+        num_blocks:       number of blocks
+        expand_ratio:     SwiGLU hidden expand ratio for ConvNeXtBlock
+        layer_scale_init: LayerScale init value (0 = disabled)
+        use_fsca:         if True and spatial_shape is set, use FSCAv2Block
+        spatial_shape:    (H, W) of the feature map — required for FSCAv2Block
+        fsca_heads:       number of XCA heads in FSCAv2Block
     """
 
     def __init__(
@@ -263,19 +265,26 @@ class ConvNeXtFusion(nn.Module):
         num_blocks: int = 3,
         expand_ratio: float = 8 / 3,
         layer_scale_init: float = 1e-6,
+        use_fsca: bool = False,
+        spatial_shape: tuple[int, int] | None = None,
+        fsca_heads: int = 8,
     ):
         super().__init__()
         self.proj  = nn.Conv2d(in_dim, out_dim, kernel_size=1, bias=False)
         self.norm0 = LayerNorm(out_dim)
-        self.blocks = nn.Sequential(*[
-            ConvNeXtBlock(
-                out_dim,
-                expand_ratio=expand_ratio,
-                layer_scale_init=layer_scale_init,
-            )
-            for _ in range(num_blocks)
-        ])
-        # [FIX-6] Không có norm1 cuối
+
+        if use_fsca and spatial_shape is not None:
+            from rfdetrv2.models.backbone.fsca import FSCAv2Block
+            H, W = spatial_shape
+            self.blocks = nn.Sequential(*[
+                FSCAv2Block(out_dim, H, W, num_heads=fsca_heads)
+                for _ in range(num_blocks)
+            ])
+        else:
+            self.blocks = nn.Sequential(*[
+                ConvNeXtBlock(out_dim, expand_ratio=expand_ratio, layer_scale_init=layer_scale_init)
+                for _ in range(num_blocks)
+            ])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.norm0(self.proj(x))
@@ -380,8 +389,11 @@ class MultiScaleProjector(nn.Module):
         survival_prob: float = 1.0,
         force_drop_last_n_features: int = 0,
         use_convnext: bool = True,
-        expand_ratio: float = 8 / 3,        # [FIX-14]
-        layer_scale_init: float = 1e-6,     # [FIX-14]
+        expand_ratio: float = 8 / 3,
+        layer_scale_init: float = 1e-6,
+        use_fsca: bool = False,
+        base_grid_size: int = 0,
+        fsca_heads: int = 8,
     ):
         super().__init__()
 
@@ -389,6 +401,15 @@ class MultiScaleProjector(nn.Module):
         self.survival_prob              = survival_prob
         self.force_drop_last_n_features = force_drop_last_n_features
         self.use_extra_pool             = False
+
+        # Pre-compute per-scale spatial shapes for FSCAv2Block (optional)
+        _scale_to_hw: dict[float, tuple[int, int]] = {}
+        if use_fsca and base_grid_size > 0:
+            for _s in scale_factors:
+                if _s == 0.25:
+                    continue
+                _g = int(round(base_grid_size * _s))
+                _scale_to_hw[_s] = (_g, _g)
 
         stages_sampling: list[nn.ModuleList] = []
         stages: list[nn.Module] = []
@@ -421,8 +442,11 @@ class MultiScaleProjector(nn.Module):
                     fused_in_dim,
                     out_channels,
                     num_blocks=num_blocks,
-                    expand_ratio=expand_ratio,          # [FIX-14]
-                    layer_scale_init=layer_scale_init,  # [FIX-14]
+                    expand_ratio=expand_ratio,
+                    layer_scale_init=layer_scale_init,
+                    use_fsca=use_fsca,
+                    spatial_shape=_scale_to_hw.get(scale),
+                    fsca_heads=fsca_heads,
                 )
             else:
                 # C2f path — giữ nguyên để backward compat

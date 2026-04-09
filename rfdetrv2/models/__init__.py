@@ -13,5 +13,4 @@
 # Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
 # ------------------------------------------------------------------------
 
-# from rfdetrv2.models.lwdetr import PostProcess, build_criterion_and_postprocessors, build_model
-from rfdetrv2.models.lwdetr_prototype import PostProcess, build_criterion_and_postprocessors, build_model
+from rfdetrv2.models.lwdetr import PostProcess, build_criterion_and_postprocessors, build_model

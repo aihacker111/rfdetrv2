@@ -1,224 +1,3 @@
-# import math
-# from pathlib import Path
-# import logging
-
-# import torch
-# import torch.nn as nn
-
-# logger = logging.getLogger(__name__)
-
-# size_to_width = {
-#     "tiny": 192,
-#     "small": 384,
-#     "base": 768,
-#     "large": 1024,
-# }
-
-# size_to_hub_name = {
-#     "small": "dinov3_vits16plus",
-#     "base": "dinov3_vitb16",
-#     "large": "dinov3_vitl16",
-# }
-
-# DEFAULT_DINOV3_REPO_DIR = Path(__file__).resolve().parents[3] / "dinov3"
-
-
-# def parse_torch_hub_source_spec(spec: str | None) -> tuple[str | None, str | None]:
-#     """Parse optional `repo_or_dir::weights` source spec. Returns (None, None) if spec is None."""
-#     if not spec:
-#         return None, None
-#     if "::" not in spec:
-#         return spec, None
-#     repo_or_dir, weights = spec.split("::", maxsplit=1)
-#     return repo_or_dir, (weights or None)
-
-
-# class TorchHubDinov3BackboneAdapter(nn.Module):
-#     """Adapter that normalizes DINOv3 torch.hub outputs to RF-DETR format."""
-
-#     def __init__(
-#         self,
-#         model: nn.Module,
-#         out_feature_indexes: list[int],
-#         patch_size: int,
-#     ) -> None:
-#         super().__init__()
-#         self.model = model
-#         self.out_feature_indexes = out_feature_indexes
-#         self.patch_size = patch_size
-
-#     @staticmethod
-#     def _extract_hidden_tensor(layer_output):
-#         if isinstance(layer_output, torch.Tensor):
-#             return layer_output
-#         if isinstance(layer_output, (tuple, list)):
-#             for item in layer_output:
-#                 if isinstance(item, torch.Tensor):
-#                     return item
-#         raise TypeError(f"Unsupported intermediate layer output type: {type(layer_output)}")
-
-#     @staticmethod
-#     def _infer_token_grid(num_tokens: int, input_hw: tuple[int, int]) -> tuple[int, int]:
-#         h_in, w_in = input_hw
-#         if h_in > 0 and w_in > 0:
-#             target_ratio = h_in / w_in
-#             best = None
-#             best_err = float("inf")
-#             for h in range(1, int(math.sqrt(num_tokens)) + 1):
-#                 if num_tokens % h != 0:
-#                     continue
-#                 w = num_tokens // h
-#                 err = abs((h / w) - target_ratio)
-#                 if err < best_err:
-#                     best = (h, w)
-#                     best_err = err
-#             if best is not None:
-#                 return best
-
-#         side = int(math.isqrt(num_tokens))
-#         if side * side != num_tokens:
-#             raise ValueError(f"Cannot infer token grid from num_tokens={num_tokens}")
-#         return side, side
-
-#     def _tokens_to_feature_map(self, tokens: torch.Tensor, input_hw: tuple[int, int]) -> torch.Tensor:
-#         if tokens.dim() == 4:
-#             return tokens
-#         if tokens.dim() != 3:
-#             raise ValueError(f"Expected token tensor with 3 or 4 dims, got shape {tuple(tokens.shape)}")
-
-#         b, n, c = tokens.shape
-#         h = input_hw[0] // self.patch_size
-#         w = input_hw[1] // self.patch_size
-#         if n == h * w + 1:
-#             tokens = tokens[:, 1:, :]
-#             n = tokens.shape[1]
-#         if n != h * w:
-#             h, w = self._infer_token_grid(n, input_hw)
-#         return tokens.reshape(b, h, w, c).permute(0, 3, 1, 2).contiguous()
-
-#     def forward(self, x: torch.Tensor):
-#         if not hasattr(self.model, "get_intermediate_layers"):
-#             raise RuntimeError(
-#                 "Loaded DINOv3 backbone does not expose get_intermediate_layers, which is required"
-#                 " to extract multi-scale RF-DETR features."
-#             )
-#         layer_outputs = self.model.get_intermediate_layers(
-#             x,
-#             n=self.out_feature_indexes,
-#             reshape=False,
-#             return_class_token=False,
-#         )
-
-#         feature_maps = []
-#         for layer_output in layer_outputs:
-#             hidden = self._extract_hidden_tensor(layer_output)
-#             feature_maps.append(self._tokens_to_feature_map(hidden, (x.shape[2], x.shape[3])))
-
-#         return (tuple(feature_maps),)
-
-
-# class DinoV3(nn.Module):
-#     def __init__(
-#         self,
-#         shape: tuple[int, int] = (640, 640),
-#         out_feature_indexes: list[int] = [2, 4, 5, 9],
-#         size: str = "base",
-#         use_registers: bool = True,
-#         use_windowed_attn: bool = True,
-#         gradient_checkpointing: bool = False,
-#         load_dinov3_weights: bool = True,
-#         pretrained_encoder: str | None = None,
-#         patch_size: int = 14,
-#         num_windows: int = 4,
-#         positional_encoding_size: int = 37,
-#         drop_path_rate: float = 0.0,
-#     ) -> None:
-#         super().__init__()
-#         if use_registers:
-#             raise ValueError("DINOv3 registers mode is not supported in RFDETRV2.")
-#         if use_windowed_attn:
-#             raise ValueError("Windowed attention is not supported in RFDETRV2.")
-#         if gradient_checkpointing:
-#             raise ValueError("Gradient checkpointing is not supported for the DINOv3 hub backbone.")
-#         if drop_path_rate > 0.0:
-#             logger.warning("drop_path_rate is ignored for the DINOv3 hub backbone.")
-#         if not load_dinov3_weights:
-#             raise ValueError("RFDETRV2 requires loading DINOv3 weights from local .pth files.")
-
-#         hub_name = size_to_hub_name[size]
-#         self.patch_size = patch_size
-#         self.shape = shape
-#         self.num_windows = num_windows
-
-#         repo_or_dir, weights = parse_torch_hub_source_spec(pretrained_encoder)
-#         if pretrained_encoder is None:
-#             project_root = Path(__file__).resolve().parents[3]
-#             weight_candidates = sorted(project_root.glob(f"{hub_name}*.pth"))
-#             if weight_candidates:
-#                 repo_or_dir = str(DEFAULT_DINOV3_REPO_DIR)
-#                 weights = str(weight_candidates[0])
-#             else:
-#                 raise FileNotFoundError(
-#                     f"Could not find local DINOv3 weights for '{hub_name}'. "
-#                     f"Either place a file like '{hub_name}*.pth' in the project root, or pass "
-#                     f"pretrained_encoder='/path/to/weights.pth' (or 'path/to/dinov3::path/to/weights.pth')."
-#                 )
-#         else:
-#             # pretrained_encoder set: may be "repo::weights" or path to .pth file
-#             weights_path = Path(pretrained_encoder).expanduser().resolve()
-#             if "::" not in pretrained_encoder and weights_path.suffix == ".pth" and weights_path.exists():
-#                 if not DEFAULT_DINOV3_REPO_DIR.exists():
-#                     raise FileNotFoundError(
-#                         f"Local DINOv3 repo not found at {DEFAULT_DINOV3_REPO_DIR}. "
-#                         "Ensure the 'dinov3' folder exists in your project root, or use "
-#                         "pretrained_encoder='path/to/dinov3::path/to/weights.pth' to specify both."
-#                     )
-#                 repo_or_dir = str(DEFAULT_DINOV3_REPO_DIR)
-#                 weights = str(weights_path)
-#                 logger.info(f"Loading DINOv3 weights from local file: {weights}")
-#             elif "::" in pretrained_encoder:
-#                 if not Path(repo_or_dir).exists():
-#                     raise FileNotFoundError(f"DINOv3 repo not found at {repo_or_dir}")
-#                 if not weights:
-#                     raise ValueError("pretrained_encoder 'repo::weights' format requires a weights path after ::")
-#                 if not Path(weights).exists():
-#                     raise FileNotFoundError(f"Weights file not found at {weights}")
-#             else:
-#                 raise FileNotFoundError(
-#                     f"pretrained_encoder must be a path to an existing .pth file, got: {pretrained_encoder}"
-#                 )
-
-#         source = "local"
-#         logger.info(f"Loading DINOv3 from {repo_or_dir} (model={hub_name})")
-#         hub_model = torch.hub.load(repo_or_dir, hub_name, source=source, weights=weights)
-#         self.encoder = TorchHubDinov3BackboneAdapter(
-#             model=hub_model,
-#             out_feature_indexes=out_feature_indexes,
-#             patch_size=patch_size,
-#         )
-
-#         self._out_feature_channels = [size_to_width[size]] * len(out_feature_indexes)
-#         self._export = False
-
-#     def export(self) -> None:
-#         self._export = True
-
-#     def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
-#         block_size = self.patch_size
-#         if x.shape[2] % block_size != 0 or x.shape[3] % block_size != 0:
-#             raise ValueError(f"Backbone requires input shape to be divisible by {block_size}, but got {x.shape}")
-#         x = self.encoder(x)
-#         return list(x[0])
-
-
-
-
-
-
-
-
-
-
 """
 DINOv3 backbone adapter for RF-DETR.
 
@@ -256,6 +35,13 @@ from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+
+from rfdetrv2.util.dinov3_pretrained import (
+    resolve_pretrained_encoder_path,
+    ensure_dinov3_hub_source,
+    dinov3_pretrained_dir,
+    DINOV3_PRETRAINED_MANIFEST,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -603,10 +389,15 @@ class DinoV3(nn.Module):
         self._export = False
 
         # ------------------------------------------------------------------
+        # Common output channel count
+        # ------------------------------------------------------------------
+        self._out_feature_channels = [SIZE_TO_WIDTH[size]] * len(out_feature_indexes)
+        hub_name = SIZE_TO_HUB_NAME[size]
+
+        # ------------------------------------------------------------------
         # Resolve repo / weights paths
         # ------------------------------------------------------------------
-        hub_name = SIZE_TO_HUB_NAME[size]
-        repo_or_dir, weights = self._resolve_weights(hub_name, pretrained_encoder)
+        repo_or_dir, weights = self._resolve_weights(hub_name, pretrained_encoder, size)
 
         # ------------------------------------------------------------------
         # Load from torch.hub (local folder; may auto-download source zip first)
@@ -642,59 +433,64 @@ class DinoV3(nn.Module):
             patch_size=patch_size,
         )
 
-        self._out_feature_channels = [SIZE_TO_WIDTH[size]] * len(out_feature_indexes)
-
     # ------------------------------------------------------------------
     # Static / class helpers
     # ------------------------------------------------------------------
 
     @staticmethod
     def _resolve_weights(
-        hub_name: str, pretrained_encoder: Optional[str]
+        hub_name: str,
+        pretrained_encoder: Optional[str],
+        size: str,
     ) -> Tuple[str, str]:
-        """Return ``(repo_or_dir, weights_path)`` for ``torch.hub.load(..., source='local')``."""
-        if pretrained_encoder is None:
-            project_root = Path(__file__).resolve().parents[3]
-            candidates = sorted(project_root.glob(f"{hub_name}*.pth"))
-            if not candidates:
-                raise FileNotFoundError(
-                    f"Could not find local DINOv3 weights for '{hub_name}'. "
-                    f"Place a file like '{hub_name}*.pth' in the project root, "
-                    "or pass pretrained_encoder='/path/to/weights.pth' "
-                    "(or 'path/to/dinov3::path/to/weights.pth')."
-                )
-            repo = dinov3_hub_repo_dir()
-            return str(repo), str(candidates[0])
+        """Return ``(repo_or_dir, weights_path)`` for ``torch.hub.load(..., source='local')``.
 
-        repo_or_dir, weights = parse_torch_hub_source_spec(pretrained_encoder)
+        Resolution order
+        ----------------
+        1. ``pretrained_encoder`` — explicit user path or ``repo::weights`` spec.
+        2. ``dinov3_pretrained/<filename>`` / project root — local cached file.
+        3. Auto-download from HuggingFace via ``dinov3_pretrained.py``.
+        """
+        project_root = Path(__file__).resolve().parents[3]
+        repo = dinov3_hub_repo_dir()
 
-        if "::" in pretrained_encoder:
-            # Explicit "repo::weights" form (repo may be created by auto-download)
-            repo_p = Path(repo_or_dir)
-            if repo_p.exists() and not repo_p.is_dir():
-                raise FileNotFoundError(
-                    f"DINOv3 repo path is not a directory: '{repo_or_dir}'"
-                )
-            if not weights:
-                raise ValueError(
-                    "The 'repo::weights' format requires a weights path after '::'."
-                )
+        # Ensure hub source tree exists (downloads from GitHub if missing)
+        ensure_dinov3_hub_source(repo)
+
+        if pretrained_encoder is not None and "::" in pretrained_encoder:
+            # Explicit "repo_dir::weights_path" form
+            repo_or_dir, weights = parse_torch_hub_source_spec(pretrained_encoder)
             if not Path(weights).exists():
                 raise FileNotFoundError(
                     f"DINOv3 weights file not found at '{weights}'"
                 )
             return repo_or_dir, weights
 
-        # Plain path to a .pth file
-        weights_path = Path(pretrained_encoder).expanduser().resolve()
-        if weights_path.suffix != ".pth" or not weights_path.exists():
-            raise FileNotFoundError(
-                f"pretrained_encoder must be a path to an existing .pth file, "
-                f"got: '{pretrained_encoder}'"
-            )
-        repo = dinov3_hub_repo_dir()
-        logger.info("Loading DINOv3 weights from local file: %s", weights_path)
-        return str(repo), str(weights_path)
+        if pretrained_encoder is not None:
+            # Plain path to a .pth file
+            weights_path = Path(pretrained_encoder).expanduser().resolve()
+            if not weights_path.exists():
+                raise FileNotFoundError(
+                    f"pretrained_encoder path does not exist: '{pretrained_encoder}'"
+                )
+            logger.info("Loading DINOv3 weights from: %s", weights_path)
+            return str(repo), str(weights_path)
+
+        # Build size → filename mapping from the manifest
+        weights_by_size = {
+            "nano":  DINOV3_PRETRAINED_MANIFEST[0][0],
+            "small": DINOV3_PRETRAINED_MANIFEST[1][0],
+            "base":  DINOV3_PRETRAINED_MANIFEST[2][0],
+            "large": DINOV3_PRETRAINED_MANIFEST[2][0],  # reuses vitb16
+        }
+
+        weights_path = resolve_pretrained_encoder_path(
+            project_root,
+            size,
+            explicit=None,
+            weights_by_size=weights_by_size,
+        )
+        return str(repo), weights_path
 
     # ------------------------------------------------------------------
     # Windowing helpers

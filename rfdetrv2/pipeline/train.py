@@ -168,6 +168,10 @@ class TrainingPipeline(BasePipeline):
 
         schedules = self._build_drop_schedules(args, steps_per_epoch)
 
+        # Enable cuDNN auto-tuner when input sizes are fixed (multi-scale disables it).
+        if torch.cuda.is_available() and not args.multi_scale:
+            torch.backends.cudnn.benchmark = True
+
         best_map_holder = BestMetricHolder(use_ema=args.use_ema)
         best_map_5095, best_map_ema_5095 = 0.0, 0.0
         test_stats = ema_test_stats = {}
@@ -389,25 +393,30 @@ class TrainingPipeline(BasePipeline):
                 train_sampler = torch.utils.data.RandomSampler(
                     dataset_train, replacement=True, num_samples=effective_bs * min_batches
                 )
+            prefetch = 2 if num_workers > 0 else None
             loader_train = DataLoader(
-                dataset_train, batch_size=effective_bs,
-                sampler=train_sampler, collate_fn=utils.collate_fn,
-                num_workers=num_workers, pin_memory=True,
-                persistent_workers=num_workers > 0,
-            )
+                    dataset_train, batch_size=effective_bs,
+                    sampler=train_sampler, collate_fn=utils.collate_fn,
+                    num_workers=num_workers, pin_memory=True,
+                    persistent_workers=num_workers > 0,
+                    prefetch_factor=prefetch,
+                )
         else:
             batch_sampler = torch.utils.data.BatchSampler(sampler_train, effective_bs, drop_last=True)
             loader_train = DataLoader(
                 dataset_train, batch_sampler=batch_sampler,
                 collate_fn=utils.collate_fn, num_workers=num_workers,
                 pin_memory=True, persistent_workers=num_workers > 0,
+                prefetch_factor=prefetch,
             )
 
+        prefetch = 2 if num_workers > 0 else None
         loader_val = DataLoader(
             dataset_val, args.batch_size, sampler=sampler_val,
             drop_last=False, collate_fn=utils.collate_fn,
             num_workers=num_workers, pin_memory=True,
             persistent_workers=num_workers > 0,
+            prefetch_factor=prefetch,
         )
         loader_test = DataLoader(
             dataset_test, args.batch_size,
@@ -415,6 +424,7 @@ class TrainingPipeline(BasePipeline):
             drop_last=False, collate_fn=utils.collate_fn,
             num_workers=num_workers, pin_memory=True,
             persistent_workers=num_workers > 0,
+            prefetch_factor=prefetch,
         )
 
         return {

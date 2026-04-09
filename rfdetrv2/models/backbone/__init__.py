@@ -7,14 +7,53 @@
 # Copyright (c) 2024 Baidu. All Rights Reserved.
 # ------------------------------------------------------------------------
 
+import math
 from typing import Callable, Dict, List
 
 import torch
-from torch import nn
+import torch.nn as nn
 
 from rfdetrv2.models.backbone.backbone import *
-from rfdetrv2.models.position_encoding import build_position_encoding
 from rfdetrv2.util.misc import NestedTensor
+
+
+class PositionEmbeddingSine(nn.Module):
+    """Sine/cosine positional encoding for 2-D feature maps."""
+
+    def __init__(self, num_pos_feats: int = 128, temperature: int = 10000, normalize: bool = True):
+        super().__init__()
+        self.num_pos_feats = num_pos_feats
+        self.temperature   = temperature
+        self.normalize     = normalize
+        self.scale         = 2 * math.pi
+
+    def forward(self, tensor_list=None, mask: torch.Tensor = None, align_dim_orders: bool = True):
+        # Accept either a NestedTensor or a raw mask tensor
+        if mask is None:
+            mask = tensor_list.mask
+        assert mask is not None
+        not_mask = ~mask
+        y_embed  = not_mask.cumsum(1, dtype=torch.float32)
+        x_embed  = not_mask.cumsum(2, dtype=torch.float32)
+        if self.normalize:
+            eps      = 1e-6
+            y_embed  = y_embed / (y_embed[:, -1:, :] + eps) * self.scale
+            x_embed  = x_embed / (x_embed[:, :, -1:] + eps) * self.scale
+        dim_t    = torch.arange(self.num_pos_feats, dtype=torch.float32, device=mask.device)
+        dim_t    = self.temperature ** (2 * (dim_t // 2) / self.num_pos_feats)
+        pos_x    = x_embed[:, :, :, None] / dim_t
+        pos_y    = y_embed[:, :, :, None] / dim_t
+        pos_x    = torch.stack((pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4).flatten(3)
+        pos_y    = torch.stack((pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()), dim=4).flatten(3)
+        pos      = torch.cat((pos_y, pos_x), dim=3)
+        return pos.permute(0, 3, 1, 2) if align_dim_orders else pos.permute(0, 3, 1, 2)
+
+
+def build_position_encoding(hidden_dim: int, position_embedding: str = "sine") -> nn.Module:
+    num_pos_feats = hidden_dim // 2
+    if position_embedding in ("v2", "sine"):
+        return PositionEmbeddingSine(num_pos_feats, normalize=True)
+    raise ValueError(f"Unknown position_embedding type: {position_embedding}")
 
 
 class Joiner(nn.Sequential):
@@ -75,11 +114,10 @@ def build_backbone(
     num_windows,
     positional_encoding_size,
     use_windowed_attn=False,
-    use_rsa=False,
-    sra_shared=True,
-    sra_G=32,
-    sra_heads=8,
     use_convnext_projector=True,
+    use_fsca=False,
+    base_grid_size=0,
+    fsca_heads=8,
 ):
     """
     Useful args:
@@ -111,11 +149,10 @@ def build_backbone(
         num_windows=num_windows,
         positional_encoding_size=positional_encoding_size,
         use_windowed_attn=use_windowed_attn,
-        use_rsa=use_rsa,
-        sra_shared=sra_shared,
-        sra_G=sra_G,
-        sra_heads=sra_heads,
         use_convnext_projector=use_convnext_projector,
+        use_fsca=use_fsca,
+        base_grid_size=base_grid_size,
+        fsca_heads=fsca_heads,
     )
 
     model = Joiner(backbone, position_embedding)
