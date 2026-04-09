@@ -133,7 +133,9 @@ def main():
                 f"{gflops:>9.2f} {cfg.resolution:>5}px"
             )
         except Exception as e:
+            import traceback
             print(f"{name:<26}  ERROR: {e}")
+            traceback.print_exc()
 
     print()
 
