@@ -81,7 +81,7 @@ def make_args(cfg, use_fsca: bool) -> argparse.Namespace:
         num_feature_levels       = len(cfg.projector_scale),
         dec_n_points             = cfg.dec_n_points,
         lite_refpoint_refine     = cfg.lite_refpoint_refine,
-        decoder_norm             = "layer_norm",
+        decoder_norm             = "LN",
         bbox_reparam             = cfg.bbox_reparam,
         use_rope                 = True,
         # Model
