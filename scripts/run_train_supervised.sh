@@ -37,7 +37,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 readonly TRAIN_PY="${SCRIPT_DIR}/train_supervised.py"
 
 # ── Training basics ────────────────────────────────────────────────────────────
-DATASET_DIR="${DATASET_DIR:-/workspace/coco_2017}"
+DATASET_DIR="${DATASET_DIR:-/workspace/coco2017}"
 OUTPUT_DIR="${OUTPUT_DIR:-/workspace/output/rfdetrv2_nano_supervised}"
 NUM_GPUS="${NUM_GPUS:-2}"
 BATCH_SIZE_PER_GPU="${BATCH_SIZE_PER_GPU:-16}"
