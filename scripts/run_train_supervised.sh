@@ -38,7 +38,7 @@ readonly TRAIN_PY="${SCRIPT_DIR}/train_supervised.py"
 
 # ── Training basics ────────────────────────────────────────────────────────────
 DATASET_DIR="${DATASET_DIR:-/workspace/coco_2017}"
-OUTPUT_DIR="${OUTPUT_DIR:-/workspace/output/rfdetrv2_small_supervised}"
+OUTPUT_DIR="${OUTPUT_DIR:-/workspace/output/rfdetrv2_nano_supervised}"
 NUM_GPUS="${NUM_GPUS:-2}"
 BATCH_SIZE_PER_GPU="${BATCH_SIZE_PER_GPU:-16}"
 MASTER_PORT="${MASTER_PORT:-29500}"
@@ -127,7 +127,7 @@ torchrun --standalone --nproc_per_node="${NUM_GPUS}" --master_port="${MASTER_POR
   --batch-size   "${BATCH_SIZE_PER_GPU}" \
   --num-workers  4 \
   --epochs       50 \
-  --model-size   small \
+  --model-size   nano \
   --use-varifocal-loss \
   --tensorboard \
   "${PROTO_FLAGS[@]}"
