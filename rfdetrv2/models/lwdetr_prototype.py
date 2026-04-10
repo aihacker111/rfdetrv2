@@ -277,14 +277,28 @@ class PrototypeMemory(nn.Module):
             # [ENH-2] Track update count
             self.proto_update_count[cls_id] += 1
 
-            # [ENH-7] Circular push into per-class feature queue
+            # [ENH-7] Circular push into per-class feature queue (vectorized)
             if self.use_queue:
-                for feat_vec in cls_feats:
-                    ptr = int(self.queue_ptr[cls_id].item())
-                    self.feat_queue[cls_id, ptr] = feat_vec
-                    new_ptr = (ptr + 1) % self.queue_size
+                n_new = cls_feats.shape[0]
+                ptr   = int(self.queue_ptr[cls_id].item())
+                if n_new >= self.queue_size:
+                    # More new features than queue capacity — just overwrite all
+                    self.feat_queue[cls_id].copy_(cls_feats[-self.queue_size:])
+                    self.queue_ptr[cls_id]  = 0
+                    self.queue_full[cls_id] = True
+                else:
+                    end = ptr + n_new
+                    if end <= self.queue_size:
+                        self.feat_queue[cls_id, ptr:end] = cls_feats
+                    else:
+                        # Wrap around: two slice writes instead of a per-element loop
+                        split = self.queue_size - ptr
+                        self.feat_queue[cls_id, ptr:]       = cls_feats[:split]
+                        self.feat_queue[cls_id, :n_new - split] = cls_feats[split:]
+                        self.queue_full[cls_id] = True
+                    new_ptr = end % self.queue_size
                     self.queue_ptr[cls_id] = new_ptr
-                    if new_ptr == 0:
+                    if end >= self.queue_size:
                         self.queue_full[cls_id] = True
 
         self.step += 1
@@ -398,12 +412,11 @@ class PrototypeMemory(nn.Module):
         feats_v = feats_norm[valid]                                        # (V, D)
         lbls_v  = lbls[valid]                                              # (V,)
 
-        # Queue features cho mỗi class: (V, K, D)
-        queue_feats = F.normalize(
-            self.feat_queue[lbls_v].float(), dim=-1
-        )
+        # Queue features for each class: (V, K, D)
+        # Already L2-normalized when stored in update() — skip redundant normalize
+        queue_feats = self.feat_queue[lbls_v].float()                      # (V, K, D)
 
-        # Temporal centroid của queue
+        # Temporal centroid — normalize after mean (mean of unit vecs is not unit)
         centroid = F.normalize(queue_feats.mean(dim=1), dim=-1)            # (V, D)
 
         sim  = (feats_v * centroid).sum(-1)                                # (V,)
@@ -468,13 +481,11 @@ class PrototypeMemory(nn.Module):
         if self.step < self.warmup_steps:
             return features.sum() * 0.0
 
-        # Filter samples whose class prototype is initialized
-        init = self.proto_initialized
-        valid_mask = torch.tensor(
-            [init[l.item()].item() if 0 <= l.item() < self.num_classes else False
-             for l in labels],
-            device=features.device,
-        )
+        # Filter samples whose class prototype is initialized (fully vectorized)
+        labels_l   = labels.long()
+        in_range   = (labels_l >= 0) & (labels_l < self.num_classes)
+        safe_idx   = labels_l.clamp(0, self.num_classes - 1)
+        valid_mask = in_range & self.proto_initialized[safe_idx]
         if not valid_mask.any():
             return features.sum() * 0.0
 
