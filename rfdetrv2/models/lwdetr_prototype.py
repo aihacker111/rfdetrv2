@@ -25,13 +25,39 @@ Giải pháp — PrototypeMemory + loss_prototype_align:
   - Curriculum tự nhiên: prototype chính xác hơn theo thời gian
   - Compatible với dist training: all_gather features trước khi update
 
-PrototypeMemory:
-  - register_buffer: persist qua steps, không train gradient
-  - EMA momentum = 0.999 (mặc định) — prototype thay đổi chậm, stable
-  - Distributed: gather features từ tất cả GPUs trước khi update
-  - Warmup: 200 steps đầu chỉ update prototype, chưa tính loss
-    (tránh loss sai khi prototype chưa có ý nghĩa)
-  - Temperature scaling: τ=0.1 → hard negatives, học biên class rõ hơn
+PrototypeMemory v1 enhancements:
+  [ENH-1] Adaptive momentum
+  [ENH-2] Class-frequency weighted loss
+  [ENH-3] Dual loss: pull + push (inter-class repulsion)
+  [ENH-4] Prototype quality score
+
+PrototypeMemory v2 enhancements (current):
+  [ENH-5] ArcFace Angular Margin
+          Thay plain cosine CE bằng ArcFace: thêm additive margin m vào
+          góc giữa feature và correct prototype.
+          → Sharper class boundaries hơn CE thông thường rất nhiều.
+          Curriculum: margin tăng dần từ 0 → arc_margin (tránh collapse sớm).
+
+  [ENH-6] Hard Negative Triplet Loss
+          Với mỗi feature f, tìm prototype sai nhưng giống nhất (hard negative).
+          Triplet loss: max(0, sim(f, hard_neg) - sim(f, proto_pos) + margin)
+          → Buộc model phải tách biệt f khỏi prototype nhầm lẫn nhất.
+          → Bổ sung cho ArcFace: ArcFace tối ưu all negatives đều nhau,
+            triplet tập trung vào cặp khó nhất.
+
+  [ENH-7] Per-Class Feature Queue + Intra-Class Cohesion Loss
+          Buffer: queue K features gần nhất theo thời gian cho mỗi class.
+          Cohesion loss: 1 - cos(f, centroid(queue_c)) cho mỗi sample.
+          → Kéo feature về temporal cluster, không chỉ EMA prototype.
+          → EMA prototype là smooth mean, queue centroid là recent trajectory
+            → signal phong phú hơn, giảm drift khi features thay đổi nhanh.
+
+  [ENH-8] Gram Orthogonality Regularization
+          Thay clamp-based repulsion bằng ||G - I||_F^2 / (C*(C-1))
+          trong đó G = P^T P là Gram matrix của initialized prototypes.
+          → Penalize ALL off-diagonal correlations (dương và âm đều bị phạt)
+          → Full gradient signal: không có dead zone từ clamp(min=0)
+          → Drives prototypes toward orthogonal basis → feature space cực tách biệt
 """
 
 import copy
@@ -67,39 +93,32 @@ from rfdetrv2.util.misc import (
 # ---------------------------------------------------------------------------
 
 class PrototypeMemory(nn.Module):
-    """EMA class prototype memory cho query feature alignment.
- 
-    Cải tiến so với v1:
-    [ENH-1] Adaptive momentum: 0.99 → momentum theo training progress
-            Early training: update nhanh hơn (prototype chưa ổn định)
-            Late training:  update chậm hơn (giữ stability)
- 
-    [ENH-2] Class-frequency weighted loss
-            Rare class xuất hiện ít → prototype update ít → weight loss cao hơn
-            Giải quyết vòng lặp bất lợi của rare class
- 
-    [ENH-3] Dual loss: pull + push
-            Pull: cross-entropy kéo feature về đúng prototype (giống v1)
-            Push: inter-class repulsion đẩy prototypes ra xa nhau
-                  → feature space orthogonal hơn → class boundary rõ hơn
- 
-    [ENH-4] Prototype quality score
-            Track variance của EMA updates → prototype ổn định → weight loss cao
-            Prototype dao động nhiều → weight loss thấp → ít tin tưởng hơn
- 
+    """EMA class prototype memory với 8 enhancements.
+
+    v1: [ENH-1..4] — adaptive momentum, freq weight, pull+push, quality score
+    v2: [ENH-5..8] — ArcFace margin, hard-neg triplet, feature queue, Gram ortho
+
     Args:
-        num_classes:     số class (không tính background)
-        feat_dim:        dimension của query feature (= hidden_dim)
-        momentum:        EMA decay target. Adaptive từ 0.99 → momentum.
-        warmup_steps:    số bước đầu chỉ update prototype, chưa tính loss.
-        temperature:     τ trong cosine classifier. 0.1 → hard negatives.
-        repulsion_coef:  weight của inter-class repulsion loss [ENH-3].
-                         0.1 là starting point, tăng nếu feature space vẫn overlap.
-        use_freq_weight: bật/tắt class-frequency weighting [ENH-2].
+        num_classes:        số class (không tính background)
+        feat_dim:           dimension của query feature (= hidden_dim)
+        momentum:           EMA decay target. Adaptive từ 0.99 → momentum.
+        warmup_steps:       số bước đầu chỉ update buffer, chưa tính loss.
+        temperature:        τ trong cosine classifier.
+        repulsion_coef:     weight của Gram orthogonality loss [ENH-8].
+        use_freq_weight:    bật/tắt class-frequency weighting [ENH-2].
         use_quality_weight: bật/tắt prototype quality weighting [ENH-4].
-        use_repulsion:   bật/tắt inter-class repulsion [ENH-3].
+        use_repulsion:      bật/tắt Gram orthogonality regularization [ENH-8].
+        arc_margin:         additive angular margin m cho ArcFace [ENH-5].
+                            0.3 → boundary gap ~17°, tương đương ArcFace paper.
+        use_arc_margin:     bật/tắt ArcFace margin [ENH-5].
+        triplet_margin:     margin cho hard-neg triplet loss [ENH-6].
+        hard_neg_coef:      weight của triplet loss [ENH-6].
+        use_hard_neg:       bật/tắt hard negative triplet [ENH-6].
+        queue_size:         số features mỗi class lưu trong queue [ENH-7].
+        queue_loss_coef:    weight của queue cohesion loss [ENH-7].
+        use_queue:          bật/tắt feature queue [ENH-7].
     """
- 
+
     def __init__(
         self,
         num_classes:        int,
@@ -111,23 +130,43 @@ class PrototypeMemory(nn.Module):
         use_freq_weight:    bool  = True,
         use_quality_weight: bool  = True,
         use_repulsion:      bool  = True,
+        # [ENH-5] ArcFace angular margin
+        arc_margin:         float = 0.3,
+        use_arc_margin:     bool  = True,
+        # [ENH-6] Hard negative triplet
+        triplet_margin:     float = 0.2,
+        hard_neg_coef:      float = 0.5,
+        use_hard_neg:       bool  = True,
+        # [ENH-7] Per-class feature queue
+        queue_size:         int   = 32,
+        queue_loss_coef:    float = 0.5,
+        use_queue:          bool  = True,
     ):
         super().__init__()
- 
+
         # Core buffers — v1
         self.register_buffer("prototypes",        torch.zeros(num_classes, feat_dim))
         self.register_buffer("proto_initialized", torch.zeros(num_classes, dtype=torch.bool))
         self.register_buffer("step",              torch.tensor(0, dtype=torch.long))
- 
+
         # [ENH-2] Class-frequency tracking
         self.register_buffer("proto_update_count",
                              torch.zeros(num_classes, dtype=torch.long))
- 
+
         # [ENH-4] Prototype quality (EMA of update magnitude)
-        # Khởi tạo = 1.0 → quality trung bình, tránh extreme weight lúc đầu
         self.register_buffer("proto_variance",
                              torch.ones(num_classes, dtype=torch.float))
- 
+
+        # [ENH-7] Per-class feature queue: (C, K, D)
+        self.queue_size = queue_size
+        if use_queue:
+            self.register_buffer("feat_queue",
+                                 torch.zeros(num_classes, queue_size, feat_dim))
+            self.register_buffer("queue_ptr",
+                                 torch.zeros(num_classes, dtype=torch.long))
+            self.register_buffer("queue_full",
+                                 torch.zeros(num_classes, dtype=torch.bool))
+
         self.num_classes        = num_classes
         self.feat_dim           = feat_dim
         self.momentum           = momentum
@@ -137,251 +176,392 @@ class PrototypeMemory(nn.Module):
         self.use_freq_weight    = use_freq_weight
         self.use_quality_weight = use_quality_weight
         self.use_repulsion      = use_repulsion
- 
+        self.arc_margin         = arc_margin
+        self.use_arc_margin     = use_arc_margin
+        self.triplet_margin     = triplet_margin
+        self.hard_neg_coef      = hard_neg_coef
+        self.use_hard_neg       = use_hard_neg
+        self.use_queue          = use_queue
+        self.queue_loss_coef    = queue_loss_coef
+
     # ------------------------------------------------------------------
     # [ENH-1] Adaptive momentum
     # ------------------------------------------------------------------
- 
+
     def _get_momentum(self) -> float:
-        """
-        Tăng dần momentum từ 0.99 → self.momentum theo training progress.
- 
-        Đầu training (step nhỏ): momentum thấp → prototype update nhanh
-        → bắt kịp với features đang thay đổi nhanh.
- 
-        Cuối training (step lớn): momentum cao → prototype ổn định
-        → tránh oscillation khi model đã converge.
- 
-        Transition xảy ra trong khoảng warmup_steps × 10 bước đầu.
-        """
+        """Linear ramp: 0.99 → self.momentum over warmup_steps*10 steps."""
         if self.warmup_steps <= 0:
             return self.momentum
         progress = min(1.0, float(self.step.item()) / max(1, self.warmup_steps * 10))
-        # Linear interpolation: 0.99 → self.momentum
         return 0.99 + (self.momentum - 0.99) * progress
- 
+
     # ------------------------------------------------------------------
-    # Update — EMA per class
+    # Update — EMA prototype + feature queue per class
     # ------------------------------------------------------------------
- 
+
     @torch.no_grad()
     def update(self, features: torch.Tensor, labels: torch.Tensor) -> None:
         if features.numel() == 0:
             return
- 
+
         device     = features.device
         labels     = labels.to(device)
         feats_norm = F.normalize(features.float().detach(), dim=-1)
- 
+
         # Distributed: gather across GPUs
         if is_dist_avail_and_initialized():
             world_size = dist.get_world_size()
- 
+
             local_size = torch.tensor([feats_norm.shape[0]],
                                       dtype=torch.long, device=device)
             all_sizes  = [torch.zeros(1, dtype=torch.long, device=device)
                           for _ in range(world_size)]
             dist.all_gather(all_sizes, local_size)
- 
+
             max_size = int(max(s.item() for s in all_sizes))
             max_size = max(0, min(max_size, 65536))
             if max_size == 0:
                 return
- 
+
             pad_feat  = torch.zeros(max_size, self.feat_dim, device=device)
             pad_label = torch.full((max_size,), -1,
                                    dtype=labels.dtype, device=device)
- 
+
             n = feats_norm.shape[0]
             if n > 0:
                 pad_feat[:n]  = feats_norm
                 pad_label[:n] = labels
- 
+
             all_feats  = [torch.zeros(max_size, self.feat_dim, device=device)
                           for _ in range(world_size)]
             all_labels = [torch.zeros(max_size, dtype=labels.dtype, device=device)
                           for _ in range(world_size)]
- 
+
             dist.all_gather(all_feats,  pad_feat)
             dist.all_gather(all_labels, pad_label)
- 
+
             feats_norm = torch.cat(all_feats,  dim=0)
             labels     = torch.cat(all_labels, dim=0)
             valid      = labels >= 0
             feats_norm = feats_norm[valid]
             labels     = labels[valid]
- 
-        # [ENH-1] Dùng adaptive momentum
+
         momentum = self._get_momentum()
- 
+
         for cls_id_t in labels.unique():
-            cls_id   = cls_id_t.item()
+            cls_id  = cls_id_t.item()
             if cls_id < 0 or cls_id >= self.num_classes:
                 continue
- 
-            cls_mask = labels == cls_id
-            cls_feat = feats_norm[cls_mask].mean(0)
- 
+
+            cls_mask  = labels == cls_id
+            cls_feats = feats_norm[cls_mask]   # (K, D)
+            cls_feat  = cls_feats.mean(0)
+
             if not self.proto_initialized[cls_id]:
                 self.prototypes[cls_id]        = cls_feat
                 self.proto_initialized[cls_id] = True
             else:
                 old_proto = self.prototypes[cls_id].clone()
- 
-                # EMA update với adaptive momentum
+
                 self.prototypes[cls_id] = (
                     momentum * old_proto + (1.0 - momentum) * cls_feat
                 )
- 
-                # [ENH-4] Track update magnitude → quality score
+
+                # [ENH-4] Track update magnitude → quality
                 update_mag = (cls_feat - old_proto).norm().item()
                 self.proto_variance[cls_id] = (
                     0.99 * self.proto_variance[cls_id].item()
                     + 0.01 * update_mag
                 )
- 
-            # [ENH-2] Track update count per class
+
+            # [ENH-2] Track update count
             self.proto_update_count[cls_id] += 1
- 
+
+            # [ENH-7] Circular push into per-class feature queue
+            if self.use_queue:
+                for feat_vec in cls_feats:
+                    ptr = int(self.queue_ptr[cls_id].item())
+                    self.feat_queue[cls_id, ptr] = feat_vec
+                    new_ptr = (ptr + 1) % self.queue_size
+                    self.queue_ptr[cls_id] = new_ptr
+                    if new_ptr == 0:
+                        self.queue_full[cls_id] = True
+
         self.step += 1
- 
+
     # ------------------------------------------------------------------
-    # [ENH-3] Inter-class repulsion loss
+    # [ENH-5] ArcFace angular margin logits
     # ------------------------------------------------------------------
- 
-    def _inter_class_repulsion_loss(self) -> torch.Tensor:
+
+    def _arcface_logits(
+        self,
+        feats_norm:  torch.Tensor,   # (M, D) — already L2-normalized
+        protos_norm: torch.Tensor,   # (C, D) — already L2-normalized
+        lbls:        torch.Tensor,   # (M,) long
+    ) -> torch.Tensor:
+        """Additive angular margin logits (ArcFace).
+
+        Công thức: logit_yi = cos(θ_yi + m) / τ, logit_j = cos(θ_j) / τ
+
+        Curriculum margin: tăng tuyến tính từ 0 → arc_margin trong
+        warmup_steps*5 bước để tránh collapse sớm khi prototypes chưa ổn.
+
+        Safeguard (ArcFace paper): khi θ + m > π, dùng cos(θ) - sin(π-m)*m
+        thay vì cos(θ + m) để giữ monotonicity của logit target.
         """
-        Đẩy prototypes ra xa nhau trong embedding space.
- 
-        Mục tiêu: prototypes của các class khác nhau nên orthogonal
-        (cosine similarity ≈ 0) thay vì gần nhau.
- 
-        Loss = mean cosine similarity của tất cả cặp prototypes.
-        Minimize → prototypes tách biệt nhau hơn.
- 
-        Chỉ tính trên initialized prototypes để tránh zero-vector artifacts.
+        if self.warmup_steps > 0:
+            progress = min(1.0, float(self.step.item()) / max(1, self.warmup_steps * 5))
+        else:
+            progress = 1.0
+        margin = self.arc_margin * progress
+
+        cos_theta = (feats_norm @ protos_norm.T).clamp(-1 + 1e-7, 1 - 1e-7)  # (M, C)
+
+        cos_m     = math.cos(margin)
+        sin_m     = math.sin(margin)
+        sin_theta = (1.0 - cos_theta ** 2).clamp(min=0).sqrt()
+
+        # cos(θ + m) = cos θ cos m - sin θ sin m
+        cos_theta_m = cos_theta * cos_m - sin_theta * sin_m    # (M, C)
+
+        # Safeguard for θ + m > π
+        th = math.cos(math.pi - margin)           # = -cos_m
+        mm = math.sin(math.pi - margin) * margin  # boundary approximation
+        cos_theta_m = torch.where(cos_theta > th, cos_theta_m, cos_theta - mm)
+
+        # Apply margin only to the target class column
+        one_hot = torch.zeros_like(cos_theta)
+        one_hot.scatter_(1, lbls.unsqueeze(1), 1.0)
+
+        logits = (one_hot * cos_theta_m + (1.0 - one_hot) * cos_theta) / self.temperature
+        return logits                                           # (M, C)
+
+    # ------------------------------------------------------------------
+    # [ENH-6] Hard negative triplet loss
+    # ------------------------------------------------------------------
+
+    def _hard_neg_triplet_loss(
+        self,
+        feats_norm:  torch.Tensor,   # (M, D)
+        protos_norm: torch.Tensor,   # (C, D)
+        lbls:        torch.Tensor,   # (M,) long
+    ) -> torch.Tensor:
+        """Triplet loss với hard negative prototype.
+
+        Với mỗi feature f_i (label c_i):
+          - positive sim: cos(f_i, proto_{c_i})
+          - hard negative sim: max_{c ≠ c_i} cos(f_i, proto_c)
+
+        Loss = mean(ReLU(sim_neg - sim_pos + margin))
+
+        → Buộc sim_pos - sim_neg > margin cho tất cả samples.
+        → Bổ sung cho ArcFace: ArcFace regularize góc globally,
+          triplet tập trung vào cặp positive/negative khó nhất.
+        """
+        cos_sim = feats_norm @ protos_norm.T   # (M, C)
+
+        # Positive similarity
+        pos_sim = cos_sim.gather(1, lbls.unsqueeze(1)).squeeze(1)   # (M,)
+
+        # Hard negative: max similarity to wrong class
+        neg_sim = cos_sim.clone()
+        neg_sim.scatter_(1, lbls.unsqueeze(1), float('-inf'))
+        hard_neg_sim = neg_sim.max(dim=1).values                    # (M,)
+
+        triplet = F.relu(hard_neg_sim - pos_sim + self.triplet_margin)
+        return triplet.mean()
+
+    # ------------------------------------------------------------------
+    # [ENH-7] Intra-class queue cohesion loss
+    # ------------------------------------------------------------------
+
+    def _queue_cohesion_loss(
+        self,
+        feats_norm: torch.Tensor,   # (M, D)
+        lbls:       torch.Tensor,   # (M,) long
+    ) -> torch.Tensor:
+        """Kéo features về temporal cluster centroid tính từ queue.
+
+        Queue centroid là mean của K features gần nhất của class —
+        khác với EMA prototype vì nó phản ánh recent trajectory,
+        không bị smooth quá mức bởi high momentum.
+
+        Loss = mean(1 - cos(f_i, centroid(queue_{c_i})))
+
+        Chỉ áp dụng cho các class đã đầy queue (queue_full=True)
+        để tránh noise khi queue còn ít samples.
+        """
+        valid = self.queue_full[lbls]   # (M,) bool
+        if not valid.any():
+            return feats_norm.sum() * 0.0
+
+        feats_v = feats_norm[valid]                                        # (V, D)
+        lbls_v  = lbls[valid]                                              # (V,)
+
+        # Queue features cho mỗi class: (V, K, D)
+        queue_feats = F.normalize(
+            self.feat_queue[lbls_v].float(), dim=-1
+        )
+
+        # Temporal centroid của queue
+        centroid = F.normalize(queue_feats.mean(dim=1), dim=-1)            # (V, D)
+
+        sim  = (feats_v * centroid).sum(-1)                                # (V,)
+        loss = (1.0 - sim).mean()
+        return loss
+
+    # ------------------------------------------------------------------
+    # [ENH-8] Gram orthogonality regularization
+    # ------------------------------------------------------------------
+
+    def _gram_orthogonality_loss(self) -> torch.Tensor:
+        """||G - I||_F^2 / (C*(C-1)) trên initialized prototypes.
+
+        Gram matrix G = P^T P. Target: G = I (orthogonal prototypes).
+
+        So sánh với v1 clamp-based repulsion:
+          v1: mean(max(sim, 0)) → gradient chết khi sim ≤ 0
+          v2: ||G-I||_F^2 → gradient liên tục, penalize cả sim dương và âm
+              → Drives tất cả off-diagonal entries → 0, không chỉ positive
         """
         initialized_idx = self.proto_initialized.nonzero(as_tuple=True)[0]
         if len(initialized_idx) < 2:
             return torch.tensor(0.0, device=self.prototypes.device)
- 
+
         protos = F.normalize(
             self.prototypes[initialized_idx].float(), dim=-1
-        )                                                        # (C_init, D)
-        sim    = protos @ protos.T                               # (C_init, C_init)
- 
-        # Chỉ lấy upper triangle — tránh self-similarity và duplicate pairs
-        mask       = torch.triu(
-            torch.ones_like(sim, dtype=torch.bool), diagonal=1
-        )
-        repulsion  = sim[mask].clamp(min=0).mean()   # penalize positive sim
-        return repulsion
- 
+        )                                                       # (C_init, D)
+        C = protos.shape[0]
+
+        G        = protos @ protos.T                            # (C_init, C_init)
+        I        = torch.eye(C, device=G.device, dtype=G.dtype)
+        off_diag = G - I
+        loss     = (off_diag ** 2).sum() / max(1, C * (C - 1))
+        return loss
+
     # ------------------------------------------------------------------
-    # Loss
+    # Loss — combines all components
     # ------------------------------------------------------------------
- 
+
     def loss(
         self,
         features: torch.Tensor,
         labels:   torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Enhanced prototype alignment loss.
- 
-        Thành phần:
-            L_pull = cross-entropy với cosine classifier (có frequency + quality weight)
-            L_push = inter-class repulsion (optional)
- 
-        Total: L = L_pull + repulsion_coef * L_push
- 
+        """Full prototype alignment loss (v2).
+
+        L = w_ce   * L_arcface          [ENH-5, ENH-2, ENH-4]
+          + w_trip  * L_triplet         [ENH-6]
+          + w_queue * L_queue_cohesion  [ENH-7]
+          + w_gram  * L_gram_ortho      [ENH-8]
+
         Args:
-            features: (M, D) — matched query features (raw, chưa normalize)
-            labels:   (M,)  — GT class labels (0-indexed, không tính background)
- 
+            features: (M, D) — matched query features (raw, unnormalized)
+            labels:   (M,)   — GT class labels (0-indexed, no background)
+
         Returns:
             scalar loss
         """
         if features.numel() == 0 or not self.proto_initialized.any():
             return features.sum() * 0.0
- 
-        # Chỉ tính loss sau warmup
+
         if self.step < self.warmup_steps:
             return features.sum() * 0.0
- 
-        # Lọc những class đã có prototype
+
+        # Filter samples whose class prototype is initialized
+        init = self.proto_initialized
         valid_mask = torch.tensor(
-            [
-                self.proto_initialized[l.item()].item()
-                if 0 <= l.item() < self.num_classes else False
-                for l in labels
-            ],
+            [init[l.item()].item() if 0 <= l.item() < self.num_classes else False
+             for l in labels],
             device=features.device,
         )
         if not valid_mask.any():
             return features.sum() * 0.0
- 
+
         feats = features[valid_mask]
-        lbls  = labels[valid_mask]
- 
-        # Normalize
+        lbls  = labels[valid_mask].long()
+
         feats_norm  = F.normalize(feats.float(),           dim=-1)   # (M, D)
         protos_norm = F.normalize(self.prototypes.float(), dim=-1)   # (C, D)
- 
-        # Cosine logits scaled by temperature
-        logits = feats_norm @ protos_norm.T / self.temperature       # (M, C)
- 
-        # Per-sample cross-entropy (reduction='none' để apply weights)
-        loss_per_sample = F.cross_entropy(logits, lbls.long(),
-                                          reduction='none')           # (M,)
- 
+
         # ------------------------------------------------------------------
-        # [ENH-2] Class-frequency weight: rare class → higher weight
+        # [ENH-5] ArcFace logits (or plain cosine fallback)
+        # ------------------------------------------------------------------
+        if self.use_arc_margin:
+            logits = self._arcface_logits(feats_norm, protos_norm, lbls)
+        else:
+            logits = feats_norm @ protos_norm.T / self.temperature    # (M, C)
+
+        loss_per_sample = F.cross_entropy(logits, lbls, reduction='none')  # (M,)
+
+        # ------------------------------------------------------------------
+        # [ENH-2] Class-frequency weight
         # ------------------------------------------------------------------
         if self.use_freq_weight:
-            counts      = self.proto_update_count[lbls.long()].float().clamp(min=1)
-            freq_weight = 1.0 / counts
+            counts      = self.proto_update_count[lbls].float().clamp(min=1)
+            freq_weight = (1.0 / counts)
             freq_weight = freq_weight / freq_weight.mean().clamp(min=1e-8)
-            freq_weight = freq_weight.clamp(max=5.0)   # cap để tránh extreme
+            freq_weight = freq_weight.clamp(max=5.0)
         else:
             freq_weight = torch.ones_like(loss_per_sample)
- 
+
         # ------------------------------------------------------------------
-        # [ENH-4] Quality weight: stable prototype → higher weight
+        # [ENH-4] Quality weight
         # ------------------------------------------------------------------
         if self.use_quality_weight:
-            variance      = self.proto_variance[lbls.long()].float().clamp(min=1e-4)
-            quality       = 1.0 / variance
-            quality       = quality / quality.mean().clamp(min=1e-8)
-            quality       = quality.clamp(max=5.0)
+            variance = self.proto_variance[lbls].float().clamp(min=1e-4)
+            quality  = (1.0 / variance)
+            quality  = quality / quality.mean().clamp(min=1e-8)
+            quality  = quality.clamp(max=5.0)
         else:
             quality = torch.ones_like(loss_per_sample)
- 
-        # Combine weights
-        combined_weight = (freq_weight * quality)
+
+        combined_weight = freq_weight * quality
         combined_weight = combined_weight / combined_weight.mean().clamp(min=1e-8)
- 
-        pull_loss = (loss_per_sample * combined_weight).mean()
- 
+
+        arcface_loss = (loss_per_sample * combined_weight).mean()
+
         # ------------------------------------------------------------------
-        # [ENH-3] Inter-class repulsion loss
+        # [ENH-6] Hard negative triplet
         # ------------------------------------------------------------------
-        if self.use_repulsion:
-            push_loss = self._inter_class_repulsion_loss()
-            total_loss = pull_loss + self.repulsion_coef * push_loss
-        else:
-            total_loss = pull_loss
- 
+        triplet_loss = (
+            self._hard_neg_triplet_loss(feats_norm, protos_norm, lbls)
+            if self.use_hard_neg else feats.sum() * 0.0
+        )
+
+        # ------------------------------------------------------------------
+        # [ENH-7] Queue cohesion
+        # ------------------------------------------------------------------
+        queue_loss = (
+            self._queue_cohesion_loss(feats_norm, lbls)
+            if self.use_queue else feats.sum() * 0.0
+        )
+
+        # ------------------------------------------------------------------
+        # [ENH-8] Gram orthogonality
+        # ------------------------------------------------------------------
+        gram_loss = (
+            self._gram_orthogonality_loss()
+            if self.use_repulsion else feats.sum() * 0.0
+        )
+
+        total_loss = (
+            arcface_loss
+            + self.hard_neg_coef   * triplet_loss
+            + self.queue_loss_coef * queue_loss
+            + self.repulsion_coef  * gram_loss
+        )
         return total_loss
- 
+
     def extra_repr(self) -> str:
         return (
             f"num_classes={self.num_classes}, feat_dim={self.feat_dim}, "
             f"momentum={self.momentum}, warmup_steps={self.warmup_steps}, "
-            f"temperature={self.temperature}, repulsion_coef={self.repulsion_coef}, "
-            f"use_freq_weight={self.use_freq_weight}, "
-            f"use_quality_weight={self.use_quality_weight}, "
-            f"use_repulsion={self.use_repulsion}"
+            f"temperature={self.temperature}, "
+            f"arc_margin={self.arc_margin}, use_arc_margin={self.use_arc_margin}, "
+            f"triplet_margin={self.triplet_margin}, hard_neg_coef={self.hard_neg_coef}, "
+            f"queue_size={self.queue_size}, queue_loss_coef={self.queue_loss_coef}, "
+            f"repulsion_coef={self.repulsion_coef}"
         )
 
 
@@ -1127,13 +1307,23 @@ def build_criterion_and_postprocessors(args):
             momentum           = getattr(args, 'prototype_momentum',           0.999),
             warmup_steps       = getattr(args, 'prototype_warmup_steps',       200),
             temperature        = getattr(args, 'prototype_temperature',        0.1),
-            # [ENH-3] Inter-class repulsion
-            repulsion_coef     = getattr(args, 'prototype_repulsion_coef',     0.1),
             # [ENH-2] Class-frequency weighting
             use_freq_weight    = getattr(args, 'prototype_use_freq_weight',    True),
             # [ENH-4] Prototype quality weighting
             use_quality_weight = getattr(args, 'prototype_use_quality_weight', True),
-            # [ENH-3] Toggle repulsion
+            # [ENH-5] ArcFace angular margin
+            arc_margin         = getattr(args, 'prototype_arc_margin',         0.3),
+            use_arc_margin     = getattr(args, 'prototype_use_arc_margin',     True),
+            # [ENH-6] Hard negative triplet
+            triplet_margin     = getattr(args, 'prototype_triplet_margin',     0.2),
+            hard_neg_coef      = getattr(args, 'prototype_hard_neg_coef',      0.5),
+            use_hard_neg       = getattr(args, 'prototype_use_hard_neg',       True),
+            # [ENH-7] Per-class feature queue
+            queue_size         = getattr(args, 'prototype_queue_size',         32),
+            queue_loss_coef    = getattr(args, 'prototype_queue_loss_coef',    0.5),
+            use_queue          = getattr(args, 'prototype_use_queue',          True),
+            # [ENH-8] Gram orthogonality (replaces v1 clamp repulsion)
+            repulsion_coef     = getattr(args, 'prototype_repulsion_coef',     0.1),
             use_repulsion      = getattr(args, 'prototype_use_repulsion',      True),
         )
         prototype_memory.to(device)

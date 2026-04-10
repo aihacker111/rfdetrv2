@@ -2194,16 +2194,30 @@ def get_args_parser():
 
     parser.add_argument('--no_convnext_projector',        action='store_true', dest='no_use_convnext_projector')
 
-    # Prototype Alignment (lwdetr_query)
-    parser.add_argument('--no_prototype_align',            action='store_false', dest='use_prototype_align')
-    parser.add_argument('--prototype_loss_coef',          default=0.1, type=float)
-    parser.add_argument('--prototype_momentum',            default=0.999, type=float)
-    parser.add_argument('--prototype_warmup_steps',       default=200, type=int)
-    parser.add_argument('--prototype_temperature',        default=0.1, type=float)
-    parser.add_argument('--prototype_repulsion_coef',     default=0.1, type=float)
-    parser.add_argument('--no_prototype_use_freq_weight', action='store_false', dest='prototype_use_freq_weight')
-    parser.add_argument('--no_prototype_use_quality_weight', action='store_false', dest='prototype_use_quality_weight')
-    parser.add_argument('--no_prototype_use_repulsion',    action='store_false', dest='prototype_use_repulsion')
+    # Prototype Alignment (lwdetr_prototype)
+    parser.add_argument('--no_prototype_align',               action='store_false', dest='use_prototype_align')
+    parser.add_argument('--prototype_loss_coef',              default=0.1,   type=float)
+    parser.add_argument('--prototype_momentum',               default=0.999, type=float)
+    parser.add_argument('--prototype_warmup_steps',           default=200,   type=int)
+    parser.add_argument('--prototype_temperature',            default=0.1,   type=float)
+    # [ENH-8] Gram orthogonality
+    parser.add_argument('--prototype_repulsion_coef',         default=0.1,   type=float)
+    parser.add_argument('--no_prototype_use_repulsion',       action='store_false', dest='prototype_use_repulsion')
+    # [ENH-2] Frequency weight
+    parser.add_argument('--no_prototype_use_freq_weight',     action='store_false', dest='prototype_use_freq_weight')
+    # [ENH-4] Quality weight
+    parser.add_argument('--no_prototype_use_quality_weight',  action='store_false', dest='prototype_use_quality_weight')
+    # [ENH-5] ArcFace angular margin
+    parser.add_argument('--prototype_arc_margin',             default=0.3,   type=float)
+    parser.add_argument('--no_prototype_arc_margin',          action='store_false', dest='prototype_use_arc_margin')
+    # [ENH-6] Hard negative triplet
+    parser.add_argument('--prototype_triplet_margin',         default=0.2,   type=float)
+    parser.add_argument('--prototype_hard_neg_coef',          default=0.5,   type=float)
+    parser.add_argument('--no_prototype_hard_neg',            action='store_false', dest='prototype_use_hard_neg')
+    # [ENH-7] Per-class feature queue
+    parser.add_argument('--prototype_queue_size',             default=32,    type=int)
+    parser.add_argument('--prototype_queue_loss_coef',        default=0.5,   type=float)
+    parser.add_argument('--no_prototype_queue',               action='store_false', dest='prototype_use_queue')
 
     # Dataset
     parser.add_argument('--dataset_file',        default="coco")
@@ -2412,9 +2426,23 @@ def populate_args(
     prototype_momentum=0.999,
     prototype_warmup_steps=200,
     prototype_temperature=0.1,
-    prototype_repulsion_coef=0.1,
+    # [ENH-2] Frequency weight
     prototype_use_freq_weight=True,
+    # [ENH-4] Quality weight
     prototype_use_quality_weight=True,
+    # [ENH-5] ArcFace angular margin
+    prototype_arc_margin=0.3,
+    prototype_use_arc_margin=True,
+    # [ENH-6] Hard negative triplet
+    prototype_triplet_margin=0.2,
+    prototype_hard_neg_coef=0.5,
+    prototype_use_hard_neg=True,
+    # [ENH-7] Per-class feature queue
+    prototype_queue_size=32,
+    prototype_queue_loss_coef=0.5,
+    prototype_use_queue=True,
+    # [ENH-8] Gram orthogonality
+    prototype_repulsion_coef=0.1,
     prototype_use_repulsion=True,
     # Additional
     subcommand=None,
@@ -2536,9 +2564,17 @@ def populate_args(
         prototype_momentum=prototype_momentum,
         prototype_warmup_steps=prototype_warmup_steps,
         prototype_temperature=prototype_temperature,
-        prototype_repulsion_coef=prototype_repulsion_coef,
         prototype_use_freq_weight=prototype_use_freq_weight,
         prototype_use_quality_weight=prototype_use_quality_weight,
+        prototype_arc_margin=prototype_arc_margin,
+        prototype_use_arc_margin=prototype_use_arc_margin,
+        prototype_triplet_margin=prototype_triplet_margin,
+        prototype_hard_neg_coef=prototype_hard_neg_coef,
+        prototype_use_hard_neg=prototype_use_hard_neg,
+        prototype_queue_size=prototype_queue_size,
+        prototype_queue_loss_coef=prototype_queue_loss_coef,
+        prototype_use_queue=prototype_use_queue,
+        prototype_repulsion_coef=prototype_repulsion_coef,
         prototype_use_repulsion=prototype_use_repulsion,
         subcommand=subcommand,
         **extra_kwargs,

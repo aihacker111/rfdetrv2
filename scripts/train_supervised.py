@@ -121,20 +121,37 @@ def _build_parser() -> argparse.ArgumentParser:
     loss.add_argument("--giou-loss-coef", type=float, default=2.0)
 
     proto = p.add_argument_group("prototype alignment (optional)")
-    proto.add_argument("--no-prototype-align", action="store_false", dest="use_prototype_align")
-    proto.add_argument("--prototype-loss-coef", type=float, default=0.1)
-    proto.add_argument("--prototype-momentum", type=float, default=0.999)
-    proto.add_argument("--prototype-warmup-steps", type=int, default=200)
-    proto.add_argument("--prototype-temperature", type=float, default=0.1)
-    proto.add_argument("--prototype-repulsion-coef", type=float, default=0.1)
-    proto.add_argument("--no-prototype-use-freq-weight", action="store_false", dest="prototype_use_freq_weight")
+    proto.add_argument("--no-prototype-align",            action="store_false", dest="use_prototype_align")
+    proto.add_argument("--prototype-loss-coef",           type=float, default=0.1)
+    proto.add_argument("--prototype-momentum",            type=float, default=0.999)
+    proto.add_argument("--prototype-warmup-steps",        type=int,   default=200)
+    proto.add_argument("--prototype-temperature",         type=float, default=0.1)
+    # [ENH-2] Frequency weight
+    proto.add_argument("--no-prototype-use-freq-weight",    action="store_false", dest="prototype_use_freq_weight")
+    # [ENH-4] Quality weight
     proto.add_argument("--no-prototype-use-quality-weight", action="store_false", dest="prototype_use_quality_weight")
-    proto.add_argument("--no-prototype-use-repulsion", action="store_false", dest="prototype_use_repulsion")
+    # [ENH-5] ArcFace angular margin
+    proto.add_argument("--prototype-arc-margin",          type=float, default=0.3)
+    proto.add_argument("--no-prototype-arc-margin",       action="store_false", dest="prototype_use_arc_margin")
+    # [ENH-6] Hard negative triplet
+    proto.add_argument("--prototype-triplet-margin",      type=float, default=0.2)
+    proto.add_argument("--prototype-hard-neg-coef",       type=float, default=0.5)
+    proto.add_argument("--no-prototype-hard-neg",         action="store_false", dest="prototype_use_hard_neg")
+    # [ENH-7] Per-class feature queue
+    proto.add_argument("--prototype-queue-size",          type=int,   default=32)
+    proto.add_argument("--prototype-queue-loss-coef",     type=float, default=0.5)
+    proto.add_argument("--no-prototype-queue",            action="store_false", dest="prototype_use_queue")
+    # [ENH-8] Gram orthogonality
+    proto.add_argument("--prototype-repulsion-coef",      type=float, default=0.1)
+    proto.add_argument("--no-prototype-use-repulsion",    action="store_false", dest="prototype_use_repulsion")
 
     p.set_defaults(
         use_prototype_align=True,
         prototype_use_freq_weight=True,
         prototype_use_quality_weight=True,
+        prototype_use_arc_margin=True,
+        prototype_use_hard_neg=True,
+        prototype_use_queue=True,
         prototype_use_repulsion=True,
     )
     return p
@@ -194,9 +211,17 @@ def main() -> None:
         prototype_momentum=args.prototype_momentum,
         prototype_warmup_steps=args.prototype_warmup_steps,
         prototype_temperature=args.prototype_temperature,
-        prototype_repulsion_coef=args.prototype_repulsion_coef,
         prototype_use_freq_weight=args.prototype_use_freq_weight,
         prototype_use_quality_weight=args.prototype_use_quality_weight,
+        prototype_arc_margin=args.prototype_arc_margin,
+        prototype_use_arc_margin=args.prototype_use_arc_margin,
+        prototype_triplet_margin=args.prototype_triplet_margin,
+        prototype_hard_neg_coef=args.prototype_hard_neg_coef,
+        prototype_use_hard_neg=args.prototype_use_hard_neg,
+        prototype_queue_size=args.prototype_queue_size,
+        prototype_queue_loss_coef=args.prototype_queue_loss_coef,
+        prototype_use_queue=args.prototype_use_queue,
+        prototype_repulsion_coef=args.prototype_repulsion_coef,
         prototype_use_repulsion=args.prototype_use_repulsion,
         freeze_encoder=args.freeze_encoder,
     )

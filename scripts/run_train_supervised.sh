@@ -1,12 +1,33 @@
 #!/usr/bin/env bash
 # RF-DETR supervised training (multi-GPU via torchrun).
 #
-# Environment (optional):
-#   DATASET_DIR   - COCO root (default: /workspace/coco_2017)
-#   OUTPUT_DIR    - run output (default: /workspace/output/rfdetrv2_small_supervised)
-#   NUM_GPUS      - torchrun --nproc_per_node (default: 2)
-#   MASTER_PORT   - distributed rendezvous port (default: 29500)
-#   CUDA_VISIBLE_DEVICES - which GPUs to use (default below: 0,1)
+# Environment variables (all optional — sensible defaults provided):
+#   DATASET_DIR              - COCO root                 (default: /workspace/coco_2017)
+#   OUTPUT_DIR               - run output dir            (default: /workspace/output/rfdetrv2_small_supervised)
+#   NUM_GPUS                 - torchrun --nproc_per_node (default: 2)
+#   MASTER_PORT              - distributed port          (default: 29500)
+#   CUDA_VISIBLE_DEVICES     - which GPUs to use         (default: 0,1)
+#
+# Prototype alignment (ENH-1..8) — toggle via env or edit defaults below:
+#   PROTO_LOSS_COEF          - overall prototype loss weight        (default: 0.1)
+#   PROTO_TEMPERATURE        - cosine classifier temperature τ      (default: 0.1)
+#   PROTO_MOMENTUM           - EMA decay target                     (default: 0.999)
+#   PROTO_WARMUP_STEPS       - steps before loss is active          (default: 200)
+#   PROTO_ARC_MARGIN         - [ENH-5] ArcFace additive margin      (default: 0.3)
+#   PROTO_TRIPLET_MARGIN     - [ENH-6] hard-neg triplet margin      (default: 0.2)
+#   PROTO_HARD_NEG_COEF      - [ENH-6] triplet loss weight          (default: 0.5)
+#   PROTO_QUEUE_SIZE         - [ENH-7] features per class in queue  (default: 32)
+#   PROTO_QUEUE_LOSS_COEF    - [ENH-7] queue cohesion loss weight   (default: 0.5)
+#   PROTO_REPULSION_COEF     - [ENH-8] Gram orthogonality weight    (default: 0.1)
+#
+# To disable individual components:
+#   NO_PROTO=1               - disable all prototype alignment
+#   NO_PROTO_ARC=1           - disable ArcFace margin  [ENH-5]
+#   NO_PROTO_HARD_NEG=1      - disable hard-neg triplet [ENH-6]
+#   NO_PROTO_QUEUE=1         - disable feature queue   [ENH-7]
+#   NO_PROTO_REPULSION=1     - disable Gram ortho      [ENH-8]
+#   NO_PROTO_FREQ_WEIGHT=1   - disable freq weighting  [ENH-2]
+#   NO_PROTO_QUALITY_WEIGHT=1 - disable quality weight [ENH-4]
 
 set -euo pipefail
 
@@ -15,12 +36,26 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly TRAIN_PY="${SCRIPT_DIR}/train_supervised.py"
 
+# ── Training basics ────────────────────────────────────────────────────────────
 DATASET_DIR="${DATASET_DIR:-/workspace/coco_2017}"
 OUTPUT_DIR="${OUTPUT_DIR:-/workspace/output/rfdetrv2_small_supervised}"
 NUM_GPUS="${NUM_GPUS:-2}"
 BATCH_SIZE_PER_GPU="${BATCH_SIZE_PER_GPU:-16}"
 MASTER_PORT="${MASTER_PORT:-29500}"
 
+# ── Prototype alignment hyperparameters ───────────────────────────────────────
+PROTO_LOSS_COEF="${PROTO_LOSS_COEF:-0.1}"
+PROTO_TEMPERATURE="${PROTO_TEMPERATURE:-0.1}"
+PROTO_MOMENTUM="${PROTO_MOMENTUM:-0.999}"
+PROTO_WARMUP_STEPS="${PROTO_WARMUP_STEPS:-200}"
+PROTO_ARC_MARGIN="${PROTO_ARC_MARGIN:-0.3}"        # [ENH-5]
+PROTO_TRIPLET_MARGIN="${PROTO_TRIPLET_MARGIN:-0.2}" # [ENH-6]
+PROTO_HARD_NEG_COEF="${PROTO_HARD_NEG_COEF:-0.5}"  # [ENH-6]
+PROTO_QUEUE_SIZE="${PROTO_QUEUE_SIZE:-32}"           # [ENH-7]
+PROTO_QUEUE_LOSS_COEF="${PROTO_QUEUE_LOSS_COEF:-0.5}" # [ENH-7]
+PROTO_REPULSION_COEF="${PROTO_REPULSION_COEF:-0.1}" # [ENH-8]
+
+# ── GPU check ─────────────────────────────────────────────────────────────────
 echo "Checking GPUs..."
 if command -v nvidia-smi >/dev/null 2>&1; then
   nvidia-smi || true
@@ -39,19 +74,62 @@ if (( NUM_GPUS < 1 )); then
   exit 1
 fi
 
-echo "Starting supervised training: ${NUM_GPUS} process(es)"
-echo "  dataset: ${DATASET_DIR}"
-echo "  output:  ${OUTPUT_DIR}"
+# ── Build prototype flags ──────────────────────────────────────────────────────
+PROTO_FLAGS=()
+if [[ "${NO_PROTO:-0}" == "1" ]]; then
+  PROTO_FLAGS+=(--no-prototype-align)
+else
+  PROTO_FLAGS+=(
+    --prototype-loss-coef      "${PROTO_LOSS_COEF}"
+    --prototype-temperature    "${PROTO_TEMPERATURE}"
+    --prototype-momentum       "${PROTO_MOMENTUM}"
+    --prototype-warmup-steps   "${PROTO_WARMUP_STEPS}"
+    # [ENH-5] ArcFace angular margin
+    --prototype-arc-margin     "${PROTO_ARC_MARGIN}"
+    # [ENH-6] Hard negative triplet
+    --prototype-triplet-margin "${PROTO_TRIPLET_MARGIN}"
+    --prototype-hard-neg-coef  "${PROTO_HARD_NEG_COEF}"
+    # [ENH-7] Per-class feature queue
+    --prototype-queue-size     "${PROTO_QUEUE_SIZE}"
+    --prototype-queue-loss-coef "${PROTO_QUEUE_LOSS_COEF}"
+    # [ENH-8] Gram orthogonality
+    --prototype-repulsion-coef "${PROTO_REPULSION_COEF}"
+  )
+  # Optional kill-switches for individual components
+  [[ "${NO_PROTO_ARC:-0}"            == "1" ]] && PROTO_FLAGS+=(--no-prototype-arc-margin)
+  [[ "${NO_PROTO_HARD_NEG:-0}"       == "1" ]] && PROTO_FLAGS+=(--no-prototype-hard-neg)
+  [[ "${NO_PROTO_QUEUE:-0}"          == "1" ]] && PROTO_FLAGS+=(--no-prototype-queue)
+  [[ "${NO_PROTO_REPULSION:-0}"      == "1" ]] && PROTO_FLAGS+=(--no-prototype-use-repulsion)
+  [[ "${NO_PROTO_FREQ_WEIGHT:-0}"    == "1" ]] && PROTO_FLAGS+=(--no-prototype-use-freq-weight)
+  [[ "${NO_PROTO_QUALITY_WEIGHT:-0}" == "1" ]] && PROTO_FLAGS+=(--no-prototype-use-quality-weight)
+fi
 
+# ── Summary ───────────────────────────────────────────────────────────────────
+echo "Starting supervised training: ${NUM_GPUS} process(es)"
+echo "  dataset : ${DATASET_DIR}"
+echo "  output  : ${OUTPUT_DIR}"
+if [[ "${NO_PROTO:-0}" == "1" ]]; then
+  echo "  prototype alignment : DISABLED"
+else
+  echo "  prototype alignment : ENABLED"
+  echo "    loss_coef=${PROTO_LOSS_COEF}  temperature=${PROTO_TEMPERATURE}  momentum=${PROTO_MOMENTUM}  warmup=${PROTO_WARMUP_STEPS}"
+  echo "    [ENH-5] arc_margin=${PROTO_ARC_MARGIN}  (disable: NO_PROTO_ARC=1)"
+  echo "    [ENH-6] triplet_margin=${PROTO_TRIPLET_MARGIN}  hard_neg_coef=${PROTO_HARD_NEG_COEF}  (disable: NO_PROTO_HARD_NEG=1)"
+  echo "    [ENH-7] queue_size=${PROTO_QUEUE_SIZE}  queue_coef=${PROTO_QUEUE_LOSS_COEF}  (disable: NO_PROTO_QUEUE=1)"
+  echo "    [ENH-8] repulsion_coef=${PROTO_REPULSION_COEF}  (disable: NO_PROTO_REPULSION=1)"
+fi
+
+# ── Launch ────────────────────────────────────────────────────────────────────
 torchrun --standalone --nproc_per_node="${NUM_GPUS}" --master_port="${MASTER_PORT}" \
   "${TRAIN_PY}" \
-  --dataset-dir "${DATASET_DIR}" \
-  --output-dir "${OUTPUT_DIR}" \
-  --batch-size "${BATCH_SIZE_PER_GPU}" \
-  --num-workers 4 \
-  --epochs 50 \
-  --model-size small \
+  --dataset-dir  "${DATASET_DIR}" \
+  --output-dir   "${OUTPUT_DIR}" \
+  --batch-size   "${BATCH_SIZE_PER_GPU}" \
+  --num-workers  4 \
+  --epochs       50 \
+  --model-size   small \
   --use-varifocal-loss \
-  --tensorboard
+  --tensorboard \
+  "${PROTO_FLAGS[@]}"
 
 echo "Done."

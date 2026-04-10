@@ -39,73 +39,174 @@ from rfdetrv2.models.ops.modules import MSDeformAttn
 # RoPE 2D
 # ---------------------------------------------------------------------------
 
-class RoPE2D(nn.Module):
-    """2D Rotary Position Embedding cho decoder self-attention.
+# class RoPE2D(nn.Module):
+#     """2D Rotary Position Embedding cho decoder self-attention.
 
-    Thay vì cộng sine_embed vào Q/K (absolute position encoding),
-    RoPE *xoay* Q và K bằng rotation matrix phụ thuộc vào (cx, cy)
-    của reference box tương ứng với mỗi query.
+#     Thay vì cộng sine_embed vào Q/K (absolute position encoding),
+#     RoPE *xoay* Q và K bằng rotation matrix phụ thuộc vào (cx, cy)
+#     của reference box tương ứng với mỗi query.
 
-    Tính chất cốt lõi:
-        Q_rot · K_rot  ∝  cos(θ(cx_i) - θ(cx_j)) × cos(θ(cy_i) - θ(cy_j))
-        → dot product chỉ phụ thuộc RELATIVE distance (Δcx, Δcy).
+#     Tính chất cốt lõi:
+#         Q_rot · K_rot  ∝  cos(θ(cx_i) - θ(cx_j)) × cos(θ(cy_i) - θ(cy_j))
+#         → dot product chỉ phụ thuộc RELATIVE distance (Δcx, Δcy).
 
-    Lợi ích:
-        ✓ Relative encoding: model học spatial relationship chính xác hơn.
-        ✓ Extrapolate tốt hơn sang resolution khác (không cố định max_pos).
-        ✓ Zero thêm trainable params (freqs là buffer cố định).
-        ✓ Stable với group_detr: mỗi group có coordinate space riêng biệt.
+#     Lợi ích:
+#         ✓ Relative encoding: model học spatial relationship chính xác hơn.
+#         ✓ Extrapolate tốt hơn sang resolution khác (không cố định max_pos).
+#         ✓ Zero thêm trainable params (freqs là buffer cố định).
+#         ✓ Stable với group_detr: mỗi group có coordinate space riêng biệt.
 
-    Dim layout (D = hidden_dim, phải chia hết cho 4):
-        Dims [0 .. D//2-1]:   encode x-coordinate (cx).
-        Dims [D//2 .. D-1]:   encode y-coordinate (cy).
-        Trong mỗi nửa: pairs (2i, 2i+1) xoay bởi cùng frequency band
-        (LLaMA style — gradient locality tốt hơn GPT-NeoX style).
+#     Dim layout (D = hidden_dim, phải chia hết cho 4):
+#         Dims [0 .. D//2-1]:   encode x-coordinate (cx).
+#         Dims [D//2 .. D-1]:   encode y-coordinate (cy).
+#         Trong mỗi nửa: pairs (2i, 2i+1) xoay bởi cùng frequency band
+#         (LLaMA style — gradient locality tốt hơn GPT-NeoX style).
+#     """
+
+#     def __init__(self, dim: int, max_freq: float = 10000.0):
+#         super().__init__()
+#         assert dim % 4 == 0, (
+#             f"RoPE2D cần dim chia hết cho 4 (x-half + y-half, mỗi half dùng "
+#             f"rotate_half). Nhận được dim={dim}."
+#         )
+#         quarter = dim // 4
+#         freqs = 1.0 / (max_freq ** (torch.arange(0, quarter).float() / quarter))
+#         self.register_buffer("freqs", freqs)   # (dim//4,)
+#         self.dim = dim
+
+#     def _rotate_half(self, x: torch.Tensor) -> torch.Tensor:
+#         """LLaMA style: rotate từng cặp liền kề (2i, 2i+1).
+
+#         [x0, x1, x2, x3, ...] → [-x1, x0, -x3, x2, ...]
+#         """
+#         x1 = x[..., 0::2]   # even indices: 0, 2, 4, ...
+#         x2 = x[..., 1::2]   # odd  indices: 1, 3, 5, ...
+#         return torch.stack([-x2, x1], dim=-1).flatten(-2)
+
+#     def forward(
+#         self,
+#         q: torch.Tensor,       # (..., N, D)
+#         k: torch.Tensor,       # (..., N, D)
+#         boxes: torch.Tensor,   # (..., N, 4)  cxcywh, sigmoid ∈ [0, 1]
+#     ) -> Tuple[torch.Tensor, torch.Tensor]:
+#         cx = boxes[..., 0]   # (..., N)
+#         cy = boxes[..., 1]   # (..., N)
+
+#         angle_x = 2 * math.pi * cx.unsqueeze(-1) * self.freqs
+#         angle_y = 2 * math.pi * cy.unsqueeze(-1) * self.freqs
+
+#         # repeat_interleave(2): [f0,f0, f1,f1, ...] — khớp với LLaMA _rotate_half
+#         cos_x = angle_x.cos().repeat_interleave(2, dim=-1)   # (..., N, dim//2)
+#         sin_x = angle_x.sin().repeat_interleave(2, dim=-1)
+#         cos_y = angle_y.cos().repeat_interleave(2, dim=-1)
+#         sin_y = angle_y.sin().repeat_interleave(2, dim=-1)
+
+#         cos = torch.cat([cos_x, cos_y], dim=-1)
+#         sin = torch.cat([sin_x, sin_y], dim=-1)
+
+#         q_rot = q * cos + self._rotate_half(q) * sin
+#         k_rot = k * cos + self._rotate_half(k) * sin
+#         return q_rot, k_rot
+
+
+class ComplexRoPE2D(nn.Module):
+    """Complex Exponential 2D Rotary Position Embedding.
+
+    Improvement over standard RoPE 2D:
+
+        Standard:  θ(x,y) = x·ω_x + y·ω_y
+                   → <q,k> = f(Δx, Δy)           [linear distance only]
+
+        Complex:   θ(x,y) = x·ω_x + y·ω_y + x·y·ω_xy
+                   → <q,k> = f(Δx, Δy, x₁y₁ - x₂y₂)
+                                                  [+ signed area / cross product]
+
+    The cross term x₁y₁ - x₂y₂ is the signed area of the parallelogram
+    spanned by the two positions. This lets the model distinguish spatial
+    orientations that share the same Manhattan distance (e.g. (0.2, 0.8)
+    vs (0.8, 0.2)) and learn aspect-ratio relationships between boxes.
+
+    Dim layout — three equal bands, each of size d_band = (dim // 6) * 2:
+        [0        .. d_band-1  ]: encode x          (ω_x frequencies)
+        [d_band   .. 2*d_band-1]: encode y          (ω_y frequencies)
+        [2*d_band .. 3*d_band-1]: encode x·y cross  (ω_xy frequencies)
+        [3*d_band .. dim-1     ]: unrotated (identity) — handles dim % 6 ≠ 0
+
+    Works with any d_model (no divisibility constraint).
+
+    Args:
+        dim:      hidden dimension (typically d_model)
+        max_freq: base frequency for geometric sequence (default 10000)
+        xy_scale: scale factor for the cross term (default 0.1, keeps it
+                  from dominating the x/y bands early in training)
     """
 
-    def __init__(self, dim: int, max_freq: float = 10000.0):
+    def __init__(self, dim: int, max_freq: float = 10000.0, xy_scale: float = 0.1):
         super().__init__()
-        assert dim % 4 == 0, (
-            f"RoPE2D cần dim chia hết cho 4 (x-half + y-half, mỗi half dùng "
-            f"rotate_half). Nhận được dim={dim}."
-        )
-        quarter = dim // 4
-        freqs = 1.0 / (max_freq ** (torch.arange(0, quarter).float() / quarter))
-        self.register_buffer("freqs", freqs)   # (dim//4,)
-        self.dim = dim
 
-    def _rotate_half(self, x: torch.Tensor) -> torch.Tensor:
-        """LLaMA style: rotate từng cặp liền kề (2i, 2i+1).
+        # d_band: largest even number ≤ dim // 3
+        # Guarantees rotate_half works (requires even band size) for any dim.
+        d_band = (dim // 6) * 2
+        assert d_band > 0, f"ComplexRoPE2D requires dim >= 6, got {dim}."
 
-        [x0, x1, x2, x3, ...] → [-x1, x0, -x3, x2, ...]
-        """
-        x1 = x[..., 0::2]   # even indices: 0, 2, 4, ...
-        x2 = x[..., 1::2]   # odd  indices: 1, 3, 5, ...
+        n_freqs = d_band // 2  # frequency bands per component (each uses 2 dims)
+        freqs = 1.0 / (max_freq ** (torch.arange(0, n_freqs).float() / n_freqs))
+
+        self.register_buffer("freqs_x",  freqs.clone())
+        self.register_buffer("freqs_y",  freqs.clone())
+        self.register_buffer("freqs_xy", freqs.clone() * xy_scale)
+
+        self.dim    = dim
+        self.d_band = d_band  # active dims per band
+        self.d_rope = 3 * d_band  # total rotated dims
+
+    @staticmethod
+    def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+        """LLaMA-style adjacent-pair rotation: [x0,x1,...] → [-x1,x0,...]"""
+        x1 = x[..., 0::2]
+        x2 = x[..., 1::2]
         return torch.stack([-x2, x1], dim=-1).flatten(-2)
+
+    def _make_cos_sin(
+        self,
+        values: torch.Tensor,  # (..., N)
+        freqs: torch.Tensor,   # (F,)
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Build cos/sin embeddings for scalar position values.
+
+        angles[..., k] = values * freqs[k]
+        repeat_interleave(2) → [f0,f0, f1,f1,...] aligned with _rotate_half.
+        """
+        angles = values.unsqueeze(-1) * freqs          # (..., N, F)
+        cos = angles.cos().repeat_interleave(2, dim=-1)  # (..., N, 2F)
+        sin = angles.sin().repeat_interleave(2, dim=-1)
+        return cos, sin
 
     def forward(
         self,
-        q: torch.Tensor,       # (..., N, D)
-        k: torch.Tensor,       # (..., N, D)
-        boxes: torch.Tensor,   # (..., N, 4)  cxcywh, sigmoid ∈ [0, 1]
+        q: torch.Tensor,      # (..., N, D)
+        k: torch.Tensor,      # (..., N, D)
+        boxes: torch.Tensor,  # (..., N, 4) cxcywh sigmoid ∈ [0, 1]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        cx = boxes[..., 0]   # (..., N)
-        cy = boxes[..., 1]   # (..., N)
+        cx = boxes[..., 0]        # (..., N)
+        cy = boxes[..., 1]        # (..., N)
+        xy = cx * cy              # (..., N) — cross / signed-area term
 
-        angle_x = 2 * math.pi * cx.unsqueeze(-1) * self.freqs
-        angle_y = 2 * math.pi * cy.unsqueeze(-1) * self.freqs
+        cos_x,  sin_x  = self._make_cos_sin(cx, self.freqs_x)    # (..., N, d_band)
+        cos_y,  sin_y  = self._make_cos_sin(cy, self.freqs_y)
+        cos_xy, sin_xy = self._make_cos_sin(xy, self.freqs_xy)
 
-        # repeat_interleave(2): [f0,f0, f1,f1, ...] — khớp với LLaMA _rotate_half
-        cos_x = angle_x.cos().repeat_interleave(2, dim=-1)   # (..., N, dim//2)
-        sin_x = angle_x.sin().repeat_interleave(2, dim=-1)
-        cos_y = angle_y.cos().repeat_interleave(2, dim=-1)
-        sin_y = angle_y.sin().repeat_interleave(2, dim=-1)
+        # Full rotation embedding covering the first d_rope dims
+        cos = torch.cat([cos_x, cos_y, cos_xy], dim=-1)   # (..., N, d_rope)
+        sin = torch.cat([sin_x, sin_y, sin_xy], dim=-1)
 
-        cos = torch.cat([cos_x, cos_y], dim=-1)
-        sin = torch.cat([sin_x, sin_y], dim=-1)
+        # Apply rotation only to the active dims; leave remainder unchanged
+        q_act, q_rest = q[..., :self.d_rope], q[..., self.d_rope:]
+        k_act, k_rest = k[..., :self.d_rope], k[..., self.d_rope:]
 
-        q_rot = q * cos + self._rotate_half(q) * sin
-        k_rot = k * cos + self._rotate_half(k) * sin
+        q_rot = torch.cat([q_act * cos + self._rotate_half(q_act) * sin, q_rest], dim=-1)
+        k_rot = torch.cat([k_act * cos + self._rotate_half(k_act) * sin, k_rest], dim=-1)
+
         return q_rot, k_rot
 
 
@@ -526,7 +627,7 @@ class TransformerDecoderLayer(nn.Module):
 
         # RoPE 2D cho self-attention only
         # rope_ca đã được xóa — cross-attention dùng with_pos_embed như gốc
-        self.rope = RoPE2D(d_model) if use_rope else None
+        self.rope = ComplexRoPE2D(d_model) if use_rope else None
 
     def with_pos_embed(self, tensor, pos):
         return tensor if pos is None else tensor + pos
