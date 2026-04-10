@@ -123,7 +123,6 @@ class TrainingPipeline(BasePipeline):
 
         if args.use_ema:
             self.ema_model = ModelEma(model_without_ddp, decay=args.ema_decay, tau=args.ema_tau)
-
         if args.resume:
             self._resume_from_checkpoint(args, model_without_ddp, optimizer, lr_scheduler)
 

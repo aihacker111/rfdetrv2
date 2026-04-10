@@ -91,11 +91,17 @@ def _build_parser() -> argparse.ArgumentParser:
     g.add_argument("--lr-encoder", type=float, default=6e-5)
     g.add_argument("--lr-scale-mode", choices=["linear", "sqrt"], default="sqrt",
                    help="Auto-scale LR with world_size")
+    g.add_argument("--lr-scheduler",
+                   choices=["cosine", "step", "linear", "multistep", "wsd"],
+                   default="cosine", help="LR decay strategy after warmup")
+    g.add_argument("--lr-min-factor", type=float, default=0.05,
+                   help="Floor LR as a fraction of peak (for cosine/linear/wsd)")
+    g.add_argument("--lr-drop", type=int, default=100,
+                   help="Epoch to drop LR (step scheduler only)")
     g.add_argument("--lr-vit-layer-decay", type=float, default=0.8)
     g.add_argument("--lr-component-decay", type=float, default=0.7)
     g.add_argument("--weight-decay", type=float, default=1e-4)
     g.add_argument("--warmup-epochs", type=float, default=1.0)
-    g.add_argument("--lr-drop", type=int, default=100)
     g.add_argument("--use-ema", action="store_true", default=True)
     g.add_argument("--ema-decay", type=float, default=0.993)
     g.add_argument("--group-detr", type=int, default=13)
@@ -162,11 +168,13 @@ def main() -> None:
         lr                  = args.lr,
         lr_encoder          = args.lr_encoder,
         lr_scale_mode       = args.lr_scale_mode,
+        lr_scheduler        = args.lr_scheduler,
+        lr_min_factor       = args.lr_min_factor,
+        lr_drop             = args.lr_drop,
         lr_vit_layer_decay  = args.lr_vit_layer_decay,
         lr_component_decay  = args.lr_component_decay,
         weight_decay        = args.weight_decay,
         warmup_epochs       = args.warmup_epochs,
-        lr_drop             = args.lr_drop,
         use_ema             = args.use_ema,
         ema_decay           = args.ema_decay,
         group_detr          = args.group_detr,
