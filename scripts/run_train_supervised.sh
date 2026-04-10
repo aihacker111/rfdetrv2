@@ -133,8 +133,7 @@ torchrun --standalone --nproc_per_node="${NUM_GPUS}" --master_port="${MASTER_POR
   --num-workers  8 \
   --epochs       50 \
   --model-size   nano \
-  --use-varifocal-loss \
   --tensorboard \
   $PROTO_FLAGS
-
+  # --use-varifocal-loss \
 echo "Done."
