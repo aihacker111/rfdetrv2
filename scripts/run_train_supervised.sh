@@ -29,7 +29,7 @@
 #   NO_PROTO_FREQ_WEIGHT=1   - disable freq weighting  [ENH-2]
 #   NO_PROTO_QUALITY_WEIGHT=1 - disable quality weight [ENH-4]
 
-set -euo pipefail
+set -e
 
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 
