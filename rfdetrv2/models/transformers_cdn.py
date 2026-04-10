@@ -748,7 +748,7 @@ def build_transformer(args):
         lite_refpoint_refine=args.lite_refpoint_refine,
         decoder_norm_type=args.decoder_norm,
         bbox_reparam=args.bbox_reparam,
-        use_rope=getattr(args, "use_rope", True),
+        use_rope=True,
     )
 
 

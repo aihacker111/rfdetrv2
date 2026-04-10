@@ -1249,7 +1249,7 @@ def build_model(args):
         sra_shared=getattr(args, "sra_shared", True),
         sra_G=getattr(args, "sra_G", 32),
         sra_heads=getattr(args, "sra_heads", 8),
-        use_convnext_projector=getattr(args, "use_convnext_projector", True),
+        use_convnext_projector=True,
     )
     if args.encoder_only:
         return backbone[0].encoder, None, None

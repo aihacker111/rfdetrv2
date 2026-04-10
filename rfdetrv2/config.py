@@ -38,7 +38,7 @@ class ModelConfig(BaseModel):
     gradient_checkpointing: bool = False
     use_windowed_attn: bool = False  # DINOv3: split image into num_windows² tiles for memory-efficient attention
     use_rsa: bool = False  # SRA: chỉ bật khi CLI / kwargs (full-res; tắt windowed attn)
-    sra_shared: bool = True  # True = một khối SRA cho mọi mức feature (cùng dim); ít param ~× số mức
+    sra_shared: bool = False  # True = một khối SRA cho mọi mức feature (cùng dim); ít param ~× số mức
     sra_G: int = 32  # Số centroid G (nhỏ hơn → ít param ở W_r; 64→32 ~giảm ~1/2 phần routing)
     sra_heads: int = 8  # SRA heads (4 thay 8 cũng giảm param MHA nếu cần)
     use_convnext_projector: bool = True  # True=ConvNeXt fusion, False=C2f (backbone projector)
